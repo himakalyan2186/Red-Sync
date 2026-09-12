@@ -3,6 +3,10 @@ import { Link, useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
 import { useAuth } from '../context/AuthContext';
+import { createUserWithEmailAndPassword } from 'firebase/auth';
+import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { auth, db } from '../firebase';
+
 
 const BGs = ['A+','A-','B+','B-','AB+','AB-','O+','O-'];
 
@@ -82,22 +86,79 @@ export function Login() {
 export function Register() {
   const [form, setForm] = useState({ name:'', email:'', password:'', blood_group:'', age:'', gender:'', phone:'', city:'', role:'donor', last_donation_date:'' });
   const [loading, setLoading] = useState(false);
-  const { login } = useAuth();
+  const { setAuthenticatedUser } = useAuth();
   const navigate = useNavigate();
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
 
   const submit = async (e) => {
-    e.preventDefault();
-    if (form.password.length<6) return toast.error('Password must be at least 6 characters');
-    setLoading(true);
-    try {
-      const { data } = await api.post('/auth/register', form);
-      login(data.token, data.user);
-      toast.success('Account created! Welcome to Life Anchor 🩸');
-      navigate('/dashboard');
-    } catch (err) { toast.error(err.response?.data?.message||'Registration failed'); }
+  e.preventDefault();
+
+  if (form.password.length < 6) {
+    return toast.error('Password must be at least 6 characters');
+  }
+
+  setLoading(true);
+
+  try {
+    // 1. Create Firebase Authentication account
+    const result = await createUserWithEmailAndPassword(
+      auth,
+      form.email,
+      form.password
+    );
+
+    const firebaseUser = result.user;
+
+    // 2. Store additional user information in Firestore
+    await setDoc(doc(db, 'users', firebaseUser.uid), {
+      uid: firebaseUser.uid,
+      name: form.name,
+      email: form.email,
+      blood_group: form.blood_group,
+      age: form.age ? Number(form.age) : null,
+      gender: form.gender,
+      phone: form.phone,
+      city: form.city,
+      role: form.role,
+      last_donation_date:
+        form.role === 'donor' ? form.last_donation_date || null : null,
+      createdAt: serverTimestamp()
+    });
+
+    // 3. Update AuthContext
+    setAuthenticatedUser({
+      uid: firebaseUser.uid,
+      email: firebaseUser.email,
+      name: form.name,
+      blood_group: form.blood_group,
+      age: form.age,
+      gender: form.gender,
+      phone: form.phone,
+      city: form.city,
+      role: form.role
+    });
+
+    toast.success('Account created! Welcome to Life Anchor 🩸');
+
+    navigate('/dashboard');
+
+  } catch (err) {
+    console.error('Firebase registration error:', err);
+
+    if (err.code === 'auth/email-already-in-use') {
+      toast.error('This email is already registered');
+    } else if (err.code === 'auth/invalid-email') {
+      toast.error('Invalid email address');
+    } else if (err.code === 'auth/weak-password') {
+      toast.error('Password is too weak');
+    } else {
+      toast.error(err.message || 'Registration failed');
+    }
+
+  } finally {
     setLoading(false);
-  };
+  }
+};
 
   return (
     <AuthLayout visual={<>
