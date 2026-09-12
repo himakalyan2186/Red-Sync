@@ -1,4 +1,4 @@
-# 🩸 Life Anchor — Blood Donation Management System
+# 🩸 Red-sync — Blood Donation Management System
 
 ## Quick Start
 
