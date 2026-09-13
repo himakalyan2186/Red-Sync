@@ -1,9 +1,15 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
 import toast from 'react-hot-toast';
-import api from '../utils/api';
 import { useAuth } from '../context/AuthContext';
+import {
+  collection,
+  query,
+  where,
+  getDocs
+} from 'firebase/firestore';
 
+import { db } from '../firebase';
 const BGs = ['A+','A-','B+','B-','AB+','AB-','O+','O-'];
 const BADGES = { Helper:'🤝', Lifesaver:'⭐', Hero:'🦸', 'Life Anchor':'⚓' };
 
@@ -44,7 +50,10 @@ function ContactModal({ donor, onClose }) {
         <div style={{ display:'flex', flexDirection:'column', gap:10, marginBottom:20 }}>
           {[
             ['📍 City', donor.city || 'Not provided'],
-            ['💉 Donations', `${donor.donation_count} lifetime donations`],
+            [
+  '💉 Donations',
+  `${donor.donation_count || 0} lifetime donations`
+],,
             ['📅 Last Donated', donor.last_donation_date ? new Date(donor.last_donation_date).toLocaleDateString() : 'Never / Not recorded'],
           ].map(([label, value]) => (
             <div key={label} style={{ display:'flex', justifyContent:'space-between', padding:'8px 0', borderBottom:'1px solid var(--border)' }}>
@@ -103,14 +112,50 @@ export default function FindDonors() {
     if (params.get('blood_group')) search();
   }, []);
 
-  const search = async () => {
-    setLoading(true); setSearched(true);
-    try {
-      const { data } = await api.get('/users/search', { params: filter });
-      setDonors(data);
-    } catch { toast.error('Search failed'); }
+const search = async (searchFilter = filter) => {
+  setLoading(true);
+  setSearched(true);
+
+  try {
+    // Get all donors from Firestore
+    const donorsQuery = query(
+      collection(db, 'users'),
+      where('role', '==', 'donor')
+    );
+
+    const snapshot = await getDocs(donorsQuery);
+
+    let donorList = snapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data()
+    }));
+
+    // Filter by blood group
+    if (searchFilter.blood_group) {
+      donorList = donorList.filter(
+        donor => donor.blood_group === searchFilter.blood_group
+      );
+    }
+
+    // Filter by city
+    if (searchFilter.city?.trim()) {
+      const city = searchFilter.city.trim().toLowerCase();
+
+      donorList = donorList.filter(
+        donor => donor.city?.toLowerCase() === city
+      );
+    }
+
+    setDonors(donorList);
+
+  } catch (error) {
+    console.error('Firestore donor search error:', error);
+    toast.error('Unable to search donors');
+
+  } finally {
     setLoading(false);
-  };
+  }
+};
 
   const isEligible = (d) => !d.last_donation_date ||
     Math.floor((Date.now() - new Date(d.last_donation_date)) / 86400000) >= 90;
@@ -148,8 +193,30 @@ export default function FindDonors() {
       {/* Quick BG select */}
       <div style={{ display:'flex', gap:10, flexWrap:'wrap', justifyContent:'center', marginBottom:28 }} className="fade-in">
         {BGs.map(bg => (
-          <button key={bg} onClick={() => { setFilter(f=>({...f,blood_group:bg})); setTimeout(search,50); }}
-            style={{ background:'none', border:`1.5px solid ${filter.blood_group===bg?'var(--red)':'var(--border)'}`, borderRadius:10, padding:'8px 12px', cursor:'pointer', transition:'all 0.2s', background: filter.blood_group===bg ? 'var(--surface)' : '#fff' }}>
+          <button key={bg} onClick={() => {
+  const newFilter = {
+    ...filter,
+    blood_group: bg
+  };
+
+  setFilter(newFilter);
+  search(newFilter);
+}}
+           style={{
+  border: `1.5px solid ${
+    filter.blood_group === bg
+      ? 'var(--red)'
+      : 'var(--border)'
+  }`,
+  borderRadius: 10,
+  padding: '8px 12px',
+  cursor: 'pointer',
+  transition: 'all 0.2s',
+  background:
+    filter.blood_group === bg
+      ? 'var(--surface)'
+      : '#fff'
+}}>
             <span className="bchip" style={{ width:36, height:36, fontSize:'0.78rem' }}>{bg}</span>
           </button>
         ))}
@@ -193,7 +260,9 @@ export default function FindDonors() {
                   <span className="bchip" style={{ margin:'8px auto', display:'flex' }}>{d.blood_group}</span>
                   <div className="donor-info">
                     {d.city && <span>📍 {d.city}</span>}
-                    <span>💉 {d.donation_count} donation{d.donation_count!==1?'s':''}</span>
+                    <span>
+  💉 {d.donation_count || 0} donation{(d.donation_count || 0) !== 1 ? 's' : ''}
+</span>
                     <span className={isEligible(d) ? 'eligible' : 'ineligible'}>
                       {isEligible(d) ? '✅ Eligible' : '⏳ On cooldown'}
                     </span>

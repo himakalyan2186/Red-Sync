@@ -2,6 +2,18 @@ import { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
+import {
+  collection,
+  query,
+  where,
+  getDocs,
+  addDoc,
+  updateDoc,
+  doc,
+  serverTimestamp
+} from 'firebase/firestore';
+
+import { db } from '../firebase';
 import ChatWindow from '../components/ChatWindow';
 
 const BGs = ['A+','A-','B+','B-','AB+','AB-','O+','O-'];
@@ -17,17 +29,60 @@ export default function SeekerDashboard() {
   const [chat, setChat] = useState(null); // { sessionId, request, donor }
   const [form, setForm] = useState({ patient_name:'', blood_group:'', units:1, emergency_level:'Medium', description:'', hospital_id:'', hospital_name:'', city:'' });
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+  if (user?.uid) {
+    load();
+  }
+}, [user?.uid]);
 
-  const load = async () => {
-    setLoading(true);
-    try {
-      const [r, h] = await Promise.all([api.get('/blood-requests/my'), api.get('/hospitals')]);
-      setRequests(r.data);
-      setHospitals(h.data);
-    } catch {}
+const load = async () => {
+  setLoading(true);
+
+  try {
+    // Load current user's blood requests from Firestore
+    const requestsQuery = query(
+      collection(db, 'blood_requests'),
+      where('requester_uid', '==', user.uid)
+    );
+
+    const requestSnapshot = await getDocs(requestsQuery);
+
+    const requestList = requestSnapshot.docs
+      .map(docSnap => {
+        const data = docSnap.data();
+
+        return {
+          id: docSnap.id,
+          ...data,
+          created_at: data.created_at?.toDate
+            ? data.created_at.toDate().toISOString()
+            : data.created_at
+        };
+      })
+      .sort(
+        (a, b) =>
+          new Date(b.created_at || 0) -
+          new Date(a.created_at || 0)
+      );
+
+    setRequests(requestList);
+
+    // Hospitals are still loaded from the existing backend
+    const h = await api.get('/hospitals');
+    setHospitals(h.data);
+
+  } catch (error) {
+
+    console.error('Error loading dashboard:', error);
+
+    toast.error('Failed to load blood requests');
+
+  } finally {
+
     setLoading(false);
-  };
+
+  }
+};
 
   const set = (k,v) => setForm(f => ({...f,[k]:v}));
 
@@ -36,29 +91,134 @@ export default function SeekerDashboard() {
     setForm(f => ({...f, hospital_id:id, hospital_name:h?.hospital_name||'', city:f.city||h?.city||''}));
   };
 
-  const submit = async (e) => {
-    e.preventDefault();
-    setSubmitting(true);
-    try {
-      await api.post('/blood-requests', form);
-      toast.success('Request created! Notifying matching donors 🩸');
-      setForm({ patient_name:'', blood_group:'', units:1, emergency_level:'Medium', description:'', hospital_id:'', hospital_name:'', city:'' });
-      setTab('requests');
-      load();
-    } catch (err) { toast.error(err.response?.data?.message || 'Failed'); }
+const submit = async (e) => {
+  e.preventDefault();
+
+  setSubmitting(true);
+
+  try {
+
+    await addDoc(collection(db, 'blood_requests'), {
+      requester_uid: user.uid,
+      requester_name: user.name,
+      requester_email: user.email || '',
+
+      patient_name: form.patient_name,
+      blood_group: form.blood_group,
+      units: Number(form.units),
+      emergency_level: form.emergency_level,
+      description: form.description,
+
+      hospital_id: form.hospital_id || '',
+      hospital_name: form.hospital_name || '',
+      city: form.city.trim().toLowerCase(),
+
+      status: 'Pending',
+
+      accepted_by: null,
+      donor_name: null,
+      donor_phone: null,
+      donor_city: null,
+      donor_blood_group: null,
+      donor_badge: null,
+
+      created_at: serverTimestamp(),
+      updated_at: serverTimestamp()
+    });
+
+    toast.success(
+      'Request created successfully! 🩸'
+    );
+
+    setForm({
+      patient_name: '',
+      blood_group: '',
+      units: 1,
+      emergency_level: 'Medium',
+      description: '',
+      hospital_id: '',
+      hospital_name: '',
+      city: ''
+    });
+
+    setTab('requests');
+
+    await load();
+
+  } catch (error) {
+
+    console.error(
+      'Firestore blood request error:',
+      error
+    );
+
+    toast.error(
+      error.message || 'Failed to create request'
+    );
+
+  } finally {
+
     setSubmitting(false);
-  };
 
-  const cancel = async (id) => {
-    if (!confirm('Cancel this request?')) return;
-    try { await api.put(`/blood-requests/${id}/status`, { status:'Cancelled' }); toast.success('Request cancelled'); load(); }
-    catch (err) { toast.error(err.response?.data?.message || 'Failed'); }
-  };
+  }
+};
 
-  const complete = async (id) => {
-    try { await api.put(`/blood-requests/${id}/status`, { status:'Completed' }); toast.success('Donation confirmed! 🎉 Donor rewarded.'); load(); }
-    catch (err) { toast.error(err.response?.data?.message || 'Failed'); }
-  };
+const cancel = async (id) => {
+
+  if (!confirm('Cancel this request?')) return;
+
+  try {
+
+    await updateDoc(
+      doc(db, 'blood_requests', id),
+      {
+        status: 'Cancelled',
+        updated_at: serverTimestamp()
+      }
+    );
+
+    toast.success('Request cancelled');
+
+    await load();
+
+  } catch (error) {
+
+    console.error('Cancel request error:', error);
+
+    toast.error('Failed to cancel request');
+
+  }
+};
+
+const complete = async (id) => {
+
+  try {
+
+    await updateDoc(
+      doc(db, 'blood_requests', id),
+      {
+        status: 'Completed',
+        updated_at: serverTimestamp()
+      }
+    );
+
+    toast.success(
+      'Donation confirmed! 🎉'
+    );
+
+    await load();
+
+  } catch (error) {
+
+    console.error(
+      'Complete request error:',
+      error
+    );
+
+    toast.error('Failed to complete request');
+
+  }
+};
 
   const openChat = (req) => {
     if (!req.chat_session_id) { toast.error('No chat session for this request'); return; }

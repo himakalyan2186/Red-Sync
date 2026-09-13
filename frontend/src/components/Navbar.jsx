@@ -36,7 +36,7 @@ export default function Navbar() {
                 <div style={{ width: 36, height: 36, borderRadius: '50%', background: 'var(--red)', color: '#fff', fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', boxShadow: '0 2px 8px var(--red-glow)' }}>
                   {user.name?.charAt(0).toUpperCase()}
                 </div>
-                <div style={{ display: 'none', position: 'absolute', right: 0, top: 'calc(100% + 8px)', background: '#fff', border: '1px solid var(--border)', borderRadius: 'var(--radius)', boxShadow: 'var(--shadow-lg)', minWidth: 180, overflow: 'hidden' }} className="user-dropdown">
+                <div style={{ display: 'none', position: 'absolute', right: 0,top: '100%', background: '#fff', border: '1px solid var(--border)', borderRadius: 'var(--radius)', boxShadow: 'var(--shadow-lg)', minWidth: 180, overflow: 'hidden' }} className="user-dropdown">
                   <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
                     <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>{user.name}</div>
                     <div style={{ fontSize: '0.78rem', color: 'var(--muted)', textTransform: 'capitalize' }}>{user.role}</div>
