@@ -4,137 +4,1192 @@ import { useAuth } from '../context/AuthContext';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
 
+import {
+  doc,
+  getDoc,
+  collection,
+  query,
+  where,
+  getDocs,
+  addDoc,
+  updateDoc,
+  setDoc,
+  deleteDoc,
+  serverTimestamp
+} from 'firebase/firestore';
+import { db } from '../firebase';
+
 export function HospitalDashboard() {
   const { user } = useAuth();
+
   const [tab, setTab] = useState('requests');
   const [profile, setProfile] = useState(null);
   const [requests, setRequests] = useState([]);
   const [camps, setCamps] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
-  const [cf, setCf] = useState({ camp_name:'', date:'', time:'', city:'', location:'', description:'', max_participants:100 });
 
+  const [cf, setCf] = useState({
+    camp_name: '',
+    date: '',
+    time: '',
+    city: '',
+    location: '',
+    description: '',
+    max_participants: 100
+  });
+
+
+  // ─────────────────────────────────────
+  // LOAD HOSPITAL DATA
+  // ─────────────────────────────────────
   useEffect(() => {
-    Promise.all([api.get('/hospitals/profile'), api.get('/hospitals/requests'), api.get('/blood-camps/my-camps')])
-      .then(([p,r,c]) => { setProfile(p.data); setRequests(r.data); setCamps(c.data); })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, []);
+    const loadHospitalData = async () => {
 
-  const createCamp = async (e) => {
-    e.preventDefault();
+      if (!user?.uid) {
+        setLoading(false);
+        return;
+      }
+
+      try {
+
+        // ─────────────────────────────────────
+        // 1. LOAD HOSPITAL PROFILE
+        // ─────────────────────────────────────
+
+        const hospitalRef = doc(
+          db,
+          'hospitals',
+          user.uid
+        );
+
+        const hospitalSnapshot = await getDoc(hospitalRef);
+
+        if (hospitalSnapshot.exists()) {
+
+          setProfile({
+            id: hospitalSnapshot.id,
+            ...hospitalSnapshot.data()
+          });
+
+        } else {
+
+          toast.error('Hospital profile not found');
+
+        }
+
+
+        // ─────────────────────────────────────
+        // 2. LOAD BLOOD REQUESTS
+        // ─────────────────────────────────────
+
+        const requestsQuery = query(
+          collection(db, 'blood_requests'),
+          where('hospital_id', '==', user.uid)
+        );
+
+        const requestsSnapshot =
+          await getDocs(requestsQuery);
+
+        const requestList =
+          requestsSnapshot.docs.map(docSnap => {
+
+            const data = docSnap.data();
+
+            return {
+              id: docSnap.id,
+              ...data,
+
+              created_at:
+                data.created_at?.toDate
+                  ? data.created_at.toDate()
+                  : data.created_at
+            };
+
+          });
+
+
+        // Sort newest requests first
+
+        requestList.sort(
+          (a, b) =>
+            new Date(b.created_at || 0) -
+            new Date(a.created_at || 0)
+        );
+
+
+        setRequests(requestList);
+
+
+        // ─────────────────────────────────────
+        // 3. LOAD BLOOD CAMPS
+        // ─────────────────────────────────────
+
+        const campsQuery = query(
+          collection(db, 'blood_camps'),
+          where('hospital_id', '==', user.uid)
+        );
+
+        const campsSnapshot =
+          await getDocs(campsQuery);
+
+        const campList =
+          campsSnapshot.docs.map(docSnap => ({
+            id: docSnap.id,
+            ...docSnap.data()
+          }));
+
+        setCamps(campList);
+
+      } catch (error) {
+
+        console.error(
+          'Hospital dashboard Firestore error:',
+          error
+        );
+
+        toast.error(
+          'Unable to load hospital dashboard'
+        );
+
+      } finally {
+
+        setLoading(false);
+
+      }
+
+    };
+
+    loadHospitalData();
+
+  }, [user?.uid]);
+
+
+  // ─────────────────────────────────────
+  // ACCEPT BLOOD REQUEST
+  // ─────────────────────────────────────
+
+  const acceptRequest = async (requestId) => {
+
     try {
-      await api.post('/blood-camps', cf);
-      toast.success('Blood camp created! 📅');
-      setShowForm(false);
-      const r = await api.get('/blood-camps/my-camps');
-      setCamps(r.data);
-    } catch (err) { toast.error(err.response?.data?.message||'Failed'); }
+
+      await updateDoc(
+        doc(
+          db,
+          'blood_requests',
+          requestId
+        ),
+        {
+          status: 'Accepted',
+
+          accepted_by: user.uid,
+
+          accepted_hospital_name:
+            profile?.hospital_name ||
+            user.name,
+
+          updated_at:
+            serverTimestamp()
+        }
+      );
+
+
+      // Update the screen immediately
+
+      setRequests(prev =>
+        prev.map(request =>
+          request.id === requestId
+            ? {
+                ...request,
+
+                status: 'Accepted',
+
+                accepted_by: user.uid,
+
+                accepted_hospital_name:
+                  profile?.hospital_name ||
+                  user.name
+              }
+            : request
+        )
+      );
+
+
+      toast.success(
+        'Blood request accepted! 🩸'
+      );
+
+    } catch (error) {
+
+      console.error(
+        'Accept request error:',
+        error
+      );
+
+      toast.error(
+        'Failed to accept request'
+      );
+
+    }
+
   };
 
-  if (loading) return <div className="page loading"><div className="spinner"></div>Loading…</div>;
+
+  // ─────────────────────────────────────
+  // CREATE BLOOD CAMP
+  // ─────────────────────────────────────
+
+ 
+const createCamp = async (e) => {
+  e.preventDefault();
+
+  try {
+    await addDoc(collection(db, 'blood_camps'), {
+      hospital_id: user.uid,
+      hospital_name: profile?.hospital_name || user.name || '',
+      camp_name: cf.camp_name,
+      date: cf.date,
+      time: cf.time,
+      city: cf.city.trim().toLowerCase(),
+      location: cf.location,
+      description: cf.description,
+      max_participants: Number(cf.max_participants),
+      registered_count: 0,
+      created_at: serverTimestamp(),
+      updated_at: serverTimestamp()
+    });
+
+    toast.success('Blood camp created successfully! 📅');
+
+    setCf({
+      camp_name: '',
+      date: '',
+      time: '',
+      city: '',
+      location: '',
+      description: '',
+      max_participants: 100
+    });
+
+    setShowForm(false);
+
+    // Reload camps from Firestore
+    const campsQuery = query(
+      collection(db, 'blood_camps'),
+      where('hospital_id', '==', user.uid)
+    );
+
+    const campsSnapshot = await getDocs(campsQuery);
+
+    const campList = campsSnapshot.docs.map(docSnap => ({
+      id: docSnap.id,
+      ...docSnap.data()
+    }));
+
+    setCamps(campList);
+
+  } catch (error) {
+    console.error('Create camp error:', error);
+    toast.error('Failed to create blood camp');
+  }
+};
+
+
+  // ─────────────────────────────────────
+  // LOADING SCREEN
+  // ─────────────────────────────────────
+
+  if (loading) {
+
+    return (
+      <div className="page loading">
+        <div className="spinner"></div>
+        Loading…
+      </div>
+    );
+
+  }
+
 
   return (
+
     <div className="page fade-in">
-      <div style={{ marginBottom:28, paddingBottom:22, borderBottom:'1px solid var(--border)' }}>
-        <div style={{ fontSize:'0.78rem', textTransform:'uppercase', letterSpacing:'0.08em', color:'var(--muted)', marginBottom:4 }}>Hospital Dashboard</div>
-        <h1 style={{ fontSize:'1.8rem', marginBottom:10 }}>🏥 {profile?.hospital_name||user.name}</h1>
-        <div style={{ display:'flex', gap:10, alignItems:'center', flexWrap:'wrap' }}>
-          {profile?.verified ? <span className="badge badge-verified">✅ Verified Hospital</span> : <span className="badge badge-unverified">⏳ Pending Verification</span>}
-          {profile?.city && <span style={{ fontSize:'0.85rem',color:'var(--muted)' }}>📍 {profile.city}</span>}
-          {profile?.phone && <span style={{ fontSize:'0.85rem',color:'var(--muted)' }}>📞 {profile.phone}</span>}
+
+      {/* ─────────────────────────────── */}
+      {/* HOSPITAL HEADER */}
+      {/* ─────────────────────────────── */}
+
+      <div
+        style={{
+          marginBottom: 28,
+          paddingBottom: 22,
+          borderBottom:
+            '1px solid var(--border)'
+        }}
+      >
+
+        <div
+          style={{
+            fontSize: '0.78rem',
+            textTransform: 'uppercase',
+            letterSpacing: '0.08em',
+            color: 'var(--muted)',
+            marginBottom: 4
+          }}
+        >
+          Hospital Dashboard
         </div>
-        {!profile?.verified && <div className="warn-banner" style={{ marginTop:12,maxWidth:520 }}>⏳ Your hospital is pending admin verification. Camp creation is disabled until verified.</div>}
+
+
+        <h1
+          style={{
+            fontSize: '1.8rem',
+            marginBottom: 10
+          }}
+        >
+          🏥 {profile?.hospital_name || user.name}
+        </h1>
+
+
+        <div
+          style={{
+            display: 'flex',
+            gap: 10,
+            alignItems: 'center',
+            flexWrap: 'wrap'
+          }}
+        >
+
+          {profile?.verified ? (
+
+            <span className="badge badge-verified">
+              ✅ Verified Hospital
+            </span>
+
+          ) : (
+
+            <span className="badge badge-unverified">
+              ⏳ Pending Verification
+            </span>
+
+          )}
+
+
+          {profile?.city && (
+
+            <span
+              style={{
+                fontSize: '0.85rem',
+                color: 'var(--muted)'
+              }}
+            >
+              📍 {profile.city}
+            </span>
+
+          )}
+
+
+          {profile?.phone && (
+
+            <span
+              style={{
+                fontSize: '0.85rem',
+                color: 'var(--muted)'
+              }}
+            >
+              📞 {profile.phone}
+            </span>
+
+          )}
+
+        </div>
+
+
+        {!profile?.verified && (
+
+          <div
+            className="warn-banner"
+            style={{
+              marginTop: 12,
+              maxWidth: 520
+            }}
+          >
+            ⏳ Your hospital is pending admin
+            verification. Camp creation is
+            disabled until verified.
+          </div>
+
+        )}
+
       </div>
 
-      <div className="grid-3" style={{ marginBottom:28 }}>
-        {[[requests.length,'Blood Requests','🩸'],[requests.filter(r=>r.status==='Pending').length,'Pending','⏳'],[camps.length,'Blood Camps','📅']].map(([n,l,i])=>(
-          <div key={l} className="stat-card"><div className="stat-num">{n}</div><div className="stat-lbl">{l}</div><div className="stat-ico">{i}</div></div>
+
+      {/* ─────────────────────────────── */}
+      {/* STATISTICS */}
+      {/* ─────────────────────────────── */}
+
+      <div
+        className="grid-3"
+        style={{
+          marginBottom: 28
+        }}
+      >
+
+        {[
+          [
+            requests.length,
+            'Blood Requests',
+            '🩸'
+          ],
+
+          [
+            requests.filter(
+              r => r.status === 'Pending'
+            ).length,
+            'Pending',
+            '⏳'
+          ],
+
+          [
+            camps.length,
+            'Blood Camps',
+            '📅'
+          ]
+
+        ].map(([n, l, i]) => (
+
+          <div
+            key={l}
+            className="stat-card"
+          >
+
+            <div className="stat-num">
+              {n}
+            </div>
+
+            <div className="stat-lbl">
+              {l}
+            </div>
+
+            <div className="stat-ico">
+              {i}
+            </div>
+
+          </div>
+
         ))}
+
       </div>
 
-      <div className="tabs" style={{ marginBottom:24 }}>
-        <button className={`tab ${tab==='requests'?'active':''}`} onClick={()=>setTab('requests')}>🩸 Blood Requests</button>
-        <button className={`tab ${tab==='camps'?'active':''}`} onClick={()=>setTab('camps')}>📅 Blood Camps</button>
+
+      {/* ─────────────────────────────── */}
+      {/* TABS */}
+      {/* ─────────────────────────────── */}
+
+      <div
+        className="tabs"
+        style={{
+          marginBottom: 24
+        }}
+      >
+
+        <button
+          className={`tab ${
+            tab === 'requests'
+              ? 'active'
+              : ''
+          }`}
+          onClick={() =>
+            setTab('requests')
+          }
+        >
+          🩸 Blood Requests
+        </button>
+
+
+        <button
+          className={`tab ${
+            tab === 'camps'
+              ? 'active'
+              : ''
+          }`}
+          onClick={() =>
+            setTab('camps')
+          }
+        >
+          📅 Blood Camps
+        </button>
+
       </div>
 
-      {tab==='requests' && (
-        requests.length===0 ? <div className="empty"><div className="ico">🩸</div><p>No requests directed to your hospital yet.</p></div> : (
+
+      {/* ═══════════════════════════════ */}
+      {/* BLOOD REQUESTS */}
+      {/* ═══════════════════════════════ */}
+
+      {tab === 'requests' && (
+
+        requests.length === 0 ? (
+
+          <div className="empty">
+
+            <div className="ico">
+              🩸
+            </div>
+
+            <p>
+              No requests directed to
+              your hospital yet.
+            </p>
+
+          </div>
+
+        ) : (
+
           <div className="tbl-wrap">
+
             <table className="tbl">
-              <thead><tr><th>Patient</th><th>Blood</th><th>Units</th><th>Emergency</th><th>Seeker</th><th>Status</th><th>Date</th></tr></thead>
+
+              <thead>
+
+                <tr>
+
+                  <th>Patient</th>
+
+                  <th>Blood</th>
+
+                  <th>Units</th>
+
+                  <th>Emergency</th>
+
+                  <th>Seeker</th>
+
+                  <th>Status</th>
+
+                  <th>Date</th>
+
+                  <th>Action</th>
+
+                </tr>
+
+              </thead>
+
+
               <tbody>
-                {requests.map(r=>(
+
+                {requests.map(r => (
+
                   <tr key={r.id}>
-                    <td><strong>{r.patient_name}</strong></td>
-                    <td><span className="bchip" style={{ width:30,height:30,fontSize:'0.7rem' }}>{r.blood_group}</span></td>
-                    <td>{r.units}</td>
-                    <td><span className={`badge badge-${r.emergency_level.toLowerCase()}`}>{r.emergency_level}</span></td>
-                    <td>{r.seeker_name}</td>
-                    <td><span className={`badge badge-${r.status.toLowerCase()}`}>{r.status}</span></td>
-                    <td style={{ fontSize:'0.8rem',color:'var(--muted)' }}>{new Date(r.created_at).toLocaleDateString()}</td>
+
+                    {/* Patient */}
+
+                    <td>
+                      <strong>
+                        {r.patient_name}
+                      </strong>
+                    </td>
+
+
+                    {/* Blood Group */}
+
+                    <td>
+
+                      <span
+                        className="bchip"
+                        style={{
+                          width: 30,
+                          height: 30,
+                          fontSize: '0.7rem'
+                        }}
+                      >
+                        {r.blood_group}
+                      </span>
+
+                    </td>
+
+
+                    {/* Units */}
+
+                    <td>
+                      {r.units}
+                    </td>
+
+
+                    {/* Emergency */}
+
+                    <td>
+
+                      <span
+                        className={`badge badge-${
+                          r.emergency_level?.toLowerCase()
+                        }`}
+                      >
+                        {r.emergency_level}
+                      </span>
+
+                    </td>
+
+
+                    {/* Seeker */}
+
+                    <td>
+                      {r.requester_name || '—'}
+                    </td>
+
+
+                    {/* Status */}
+
+                    <td>
+
+                      <span
+                        className={`badge badge-${
+                          r.status?.toLowerCase()
+                        }`}
+                      >
+                        {r.status}
+                      </span>
+
+                    </td>
+
+
+                    {/* Date */}
+
+                    <td
+                      style={{
+                        fontSize: '0.8rem',
+                        color: 'var(--muted)'
+                      }}
+                    >
+
+                      {r.created_at
+                        ? new Date(
+                            r.created_at
+                          ).toLocaleDateString()
+                        : '—'}
+
+                    </td>
+
+
+                    {/* ACTION */}
+
+                    <td>
+
+                      {r.status === 'Pending' && (
+
+                        <button
+                          className="btn btn-primary btn-sm"
+                          onClick={() =>
+                            acceptRequest(r.id)
+                          }
+                        >
+                          Accept
+                        </button>
+
+                      )}
+
+
+                      {r.status === 'Accepted' && (
+
+                        <span className="badge badge-completed">
+                          Accepted
+                        </span>
+
+                      )}
+
+
+                      {r.status === 'Completed' && (
+
+                        <span className="badge badge-completed">
+                          Completed
+                        </span>
+
+                      )}
+
+
+                      {r.status === 'Cancelled' && (
+
+                        <span className="badge badge-cancelled">
+                          Cancelled
+                        </span>
+
+                      )}
+
+                    </td>
+
                   </tr>
+
                 ))}
+
               </tbody>
+
             </table>
+
           </div>
+
         )
+
       )}
 
-      {tab==='camps' && (
+
+      {/* ═══════════════════════════════ */}
+      {/* BLOOD CAMPS */}
+      {/* ═══════════════════════════════ */}
+
+      {tab === 'camps' && (
+
         <div>
-          <div style={{ display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20 }}>
-            <h3>Your Camps</h3>
-            {profile?.verified && <button className="btn btn-primary" onClick={()=>setShowForm(!showForm)}>{showForm?'✕ Cancel':'+ Create Camp'}</button>}
-          </div>
-          {showForm && (
-            <div className="card" style={{ marginBottom:24 }}>
-              <h3 style={{ marginBottom:20 }}>Create Blood Camp</h3>
-              <form onSubmit={createCamp} style={{ display:'flex',flexDirection:'column',gap:16 }}>
-                <div style={{ display:'grid',gridTemplateColumns:'1fr 1fr',gap:14 }}>
-                  <div className="form-group"><label className="form-label">Camp Name</label><input className="form-control" placeholder="e.g. World Blood Donor Day" value={cf.camp_name} onChange={e=>setCf(f=>({...f,camp_name:e.target.value}))} required /></div>
-                  <div className="form-group"><label className="form-label">Date</label><input type="date" className="form-control" value={cf.date} onChange={e=>setCf(f=>({...f,date:e.target.value}))} required min={new Date().toISOString().split('T')[0]} /></div>
-                  <div className="form-group"><label className="form-label">Time</label><input type="time" className="form-control" value={cf.time} onChange={e=>setCf(f=>({...f,time:e.target.value}))} /></div>
-                  <div className="form-group"><label className="form-label">City</label><input className="form-control" placeholder="City" value={cf.city} onChange={e=>setCf(f=>({...f,city:e.target.value}))} required /></div>
-                  <div className="form-group"><label className="form-label">Max Participants</label><input type="number" className="form-control" min={10} value={cf.max_participants} onChange={e=>setCf(f=>({...f,max_participants:e.target.value}))} /></div>
-                </div>
-                <div className="form-group"><label className="form-label">Venue/Location</label><input className="form-control" placeholder="Full venue address" value={cf.location} onChange={e=>setCf(f=>({...f,location:e.target.value}))} /></div>
-                <div className="form-group"><label className="form-label">Description</label><textarea className="form-control" rows={3} placeholder="What donors can expect…" value={cf.description} onChange={e=>setCf(f=>({...f,description:e.target.value}))} /></div>
-                <button type="submit" className="btn btn-primary">📅 Create Camp</button>
-              </form>
-            </div>
-          )}
-          {camps.length===0 ? <div className="empty"><div className="ico">📅</div><p>No camps created yet.</p></div> : (
-            <div className="grid-2">
-              {camps.map(c=>(
-                <div key={c.id} className="card">
-                  <div style={{ display:'flex',gap:14,marginBottom:14 }}>
-                    <div style={{ background:'var(--surface)',borderRadius:10,padding:'10px 14px',textAlign:'center',flexShrink:0 }}>
-                      <div style={{ fontFamily:'var(--font-d)',fontSize:'1.5rem',fontWeight:700,color:'var(--red)',lineHeight:1 }}>{new Date(c.date).getDate()}</div>
-                      <div style={{ fontSize:'0.72rem',color:'var(--muted)',textTransform:'uppercase' }}>{new Date(c.date).toLocaleDateString('en',{month:'short'})}</div>
-                    </div>
-                    <div><div style={{ fontWeight:700,fontSize:'1rem',marginBottom:2 }}>{c.camp_name}</div><div style={{ fontSize:'0.82rem',color:'var(--muted)' }}>📍 {c.city} {c.time&&`· 🕐 ${c.time}`}</div></div>
-                  </div>
-                  <div style={{ display:'flex',gap:8,marginBottom:10 }}>
-                    <span style={{ background:'var(--surface)',padding:'3px 10px',borderRadius:12,fontSize:'0.79rem' }}>👥 {c.registered_count}/{c.max_participants}</span>
-                  </div>
-                  {c.description && <p style={{ fontSize:'0.83rem',color:'var(--text2)' }}>{c.description}</p>}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
 
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              marginBottom: 20
+            }}
+          >
+
+            <h3>
+              Your Camps
+            </h3>
+
+
+            {profile?.verified && (
+
+              <button
+                className="btn btn-primary"
+                onClick={() =>
+                  setShowForm(!showForm)
+                }
+              >
+                {showForm
+                  ? '✕ Cancel'
+                  : '+ Create Camp'}
+              </button>
+
+            )}
+
+          </div>
+
+
+          {/* CREATE CAMP FORM */}
+
+          {showForm && (
+
+            <div
+              className="card"
+              style={{
+                marginBottom: 24
+              }}
+            >
+
+              <h3
+                style={{
+                  marginBottom: 20
+                }}
+              >
+                Create Blood Camp
+              </h3>
+
+
+              <form
+                onSubmit={createCamp}
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 16
+                }}
+              >
+
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns:
+                      '1fr 1fr',
+                    gap: 14
+                  }}
+                >
+
+                  {/* Camp Name */}
+
+                  <div className="form-group">
+
+                    <label className="form-label">
+                      Camp Name
+                    </label>
+
+                    <input
+                      className="form-control"
+                      placeholder="e.g. World Blood Donor Day"
+                      value={cf.camp_name}
+                      onChange={e =>
+                        setCf(f => ({
+                          ...f,
+                          camp_name:
+                            e.target.value
+                        }))
+                      }
+                      required
+                    />
+
+                  </div>
+
+
+                  {/* Date */}
+
+                  <div className="form-group">
+
+                    <label className="form-label">
+                      Date
+                    </label>
+
+                    <input
+                      type="date"
+                      className="form-control"
+                      value={cf.date}
+                      onChange={e =>
+                        setCf(f => ({
+                          ...f,
+                          date:
+                            e.target.value
+                        }))
+                      }
+                      required
+                      min={
+                        new Date()
+                          .toISOString()
+                          .split('T')[0]
+                      }
+                    />
+
+                  </div>
+
+
+                  {/* Time */}
+
+                  <div className="form-group">
+
+                    <label className="form-label">
+                      Time
+                    </label>
+
+                    <input
+                      type="time"
+                      className="form-control"
+                      value={cf.time}
+                      onChange={e =>
+                        setCf(f => ({
+                          ...f,
+                          time:
+                            e.target.value
+                        }))
+                      }
+                    />
+
+                  </div>
+
+
+                  {/* City */}
+
+                  <div className="form-group">
+
+                    <label className="form-label">
+                      City
+                    </label>
+
+                    <input
+                      className="form-control"
+                      placeholder="City"
+                      value={cf.city}
+                      onChange={e =>
+                        setCf(f => ({
+                          ...f,
+                          city:
+                            e.target.value
+                        }))
+                      }
+                      required
+                    />
+
+                  </div>
+
+
+                  {/* Max Participants */}
+
+                  <div className="form-group">
+
+                    <label className="form-label">
+                      Max Participants
+                    </label>
+
+                    <input
+                      type="number"
+                      className="form-control"
+                      min={10}
+                      value={
+                        cf.max_participants
+                      }
+                      onChange={e =>
+                        setCf(f => ({
+                          ...f,
+                          max_participants:
+                            e.target.value
+                        }))
+                      }
+                    />
+
+                  </div>
+
+                </div>
+
+
+                {/* Location */}
+
+                <div className="form-group">
+
+                  <label className="form-label">
+                    Venue/Location
+                  </label>
+
+                  <input
+                    className="form-control"
+                    placeholder="Full venue address"
+                    value={cf.location}
+                    onChange={e =>
+                      setCf(f => ({
+                        ...f,
+                        location:
+                          e.target.value
+                      }))
+                    }
+                  />
+
+                </div>
+
+
+                {/* Description */}
+
+                <div className="form-group">
+
+                  <label className="form-label">
+                    Description
+                  </label>
+
+                  <textarea
+                    className="form-control"
+                    rows={3}
+                    placeholder="What donors can expect…"
+                    value={cf.description}
+                    onChange={e =>
+                      setCf(f => ({
+                        ...f,
+                        description:
+                          e.target.value
+                      }))
+                    }
+                  />
+
+                </div>
+
+
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                >
+                  📅 Create Camp
+                </button>
+
+              </form>
+
+            </div>
+
+          )}
+
+
+          {/* CAMPS LIST */}
+
+          {camps.length === 0 ? (
+
+            <div className="empty">
+
+              <div className="ico">
+                📅
+              </div>
+
+              <p>
+                No camps created yet.
+              </p>
+
+            </div>
+
+          ) : (
+
+            <div className="grid-2">
+
+              {camps.map(c => (
+
+                <div
+                  key={c.id}
+                  className="card"
+                >
+
+                  <div
+                    style={{
+                      display: 'flex',
+                      gap: 14,
+                      marginBottom: 14
+                    }}
+                  >
+
+                    <div
+                      style={{
+                        background:
+                          'var(--surface)',
+                        borderRadius: 10,
+                        padding:
+                          '10px 14px',
+                        textAlign: 'center',
+                        flexShrink: 0
+                      }}
+                    >
+
+                      <div
+                        style={{
+                          fontFamily:
+                            'var(--font-d)',
+                          fontSize:
+                            '1.5rem',
+                          fontWeight: 700,
+                          color:
+                            'var(--red)',
+                          lineHeight: 1
+                        }}
+                      >
+                        {new Date(
+                          c.date
+                        ).getDate()}
+                      </div>
+
+
+                      <div
+                        style={{
+                          fontSize:
+                            '0.72rem',
+                          color:
+                            'var(--muted)',
+                          textTransform:
+                            'uppercase'
+                        }}
+                      >
+                        {new Date(
+                          c.date
+                        ).toLocaleDateString(
+                          'en',
+                          {
+                            month: 'short'
+                          }
+                        )}
+                      </div>
+
+                    </div>
+
+
+                    <div>
+
+                      <div
+                        style={{
+                          fontWeight: 700,
+                          fontSize: '1rem',
+                          marginBottom: 2
+                        }}
+                      >
+                        {c.camp_name}
+                      </div>
+
+                      <div
+                        style={{
+                          fontSize:
+                            '0.82rem',
+                          color:
+                            'var(--muted)'
+                        }}
+                      >
+                        📍 {c.city}
+
+                        {c.time &&
+                          ` · 🕐 ${c.time}`}
+                      </div>
+
+                    </div>
+
+                  </div>
+
+
+                  <div
+                    style={{
+                      display: 'flex',
+                      gap: 8,
+                      marginBottom: 10
+                    }}
+                  >
+
+                    <span
+                      style={{
+                        background:
+                          'var(--surface)',
+                        padding:
+                          '3px 10px',
+                        borderRadius: 12,
+                        fontSize:
+                          '0.79rem'
+                      }}
+                    >
+                      👥 {c.registered_count || 0}/
+                      {c.max_participants}
+                    </span>
+
+                  </div>
+
+
+                  {c.description && (
+
+                    <p
+                      style={{
+                        fontSize:
+                          '0.83rem',
+                        color:
+                          'var(--text2)'
+                      }}
+                    >
+                      {c.description}
+                    </p>
+
+                  )}
+
+                </div>
+
+              ))}
+
+            </div>
+
+          )}
+
+        </div>
+
+      )}
+
+    </div>
+
+  );
+
+}
 // ── AdminDashboard.jsx ────────────────────────────────────────────────────────
 import { Bar } from 'react-chartjs-2';
 import { Chart as ChartJS, CategoryScale, LinearScale, BarElement, Tooltip, Legend } from 'chart.js';
 ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip, Legend);
 
 export function AdminDashboard() {
+  const { user } = useAuth();
+
   const [tab, setTab] = useState('overview');
   const [dash, setDash] = useState(null);
   const [users, setUsers] = useState([]);
@@ -142,175 +1197,1110 @@ export function AdminDashboard() {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    Promise.all([api.get('/admin/dashboard'), api.get('/stats')])
-      .then(([d,s]) => { setDash(d.data); setStats(s.data); })
-      .catch(()=>{})
-      .finally(()=>setLoading(false));
-  }, []);
+  // ─────────────────────────────────────
+  // LOAD ALL ADMIN DATA
+  // ─────────────────────────────────────
 
-  useEffect(() => { if(tab==='users') api.get('/admin/users').then(r=>setUsers(r.data)).catch(()=>{}); },[tab]);
-  useEffect(() => { if(tab==='hospitals') api.get('/admin/hospitals').then(r=>setHosps(r.data)).catch(()=>{}); },[tab]);
+  const loadAdminData = async () => {
+    setLoading(true);
+
+    try {
+      // USERS
+      const usersSnapshot = await getDocs(
+        collection(db, 'users')
+      );
+
+      const userList = usersSnapshot.docs.map(docSnap => ({
+        id: docSnap.id,
+        ...docSnap.data()
+      }));
+
+      setUsers(userList);
+
+      // HOSPITALS
+      const hospitalsSnapshot = await getDocs(
+        collection(db, 'hospitals')
+      );
+
+      const hospitalList = hospitalsSnapshot.docs.map(docSnap => ({
+        id: docSnap.id,
+        ...docSnap.data()
+      }));
+
+      setHosps(hospitalList);
+
+      // BLOOD REQUESTS
+      const requestsSnapshot = await getDocs(
+        collection(db, 'blood_requests')
+      );
+
+      const requests = requestsSnapshot.docs.map(docSnap => ({
+        id: docSnap.id,
+        ...docSnap.data()
+      }));
+
+      // BLOOD CAMPS
+      const campsSnapshot = await getDocs(
+        collection(db, 'blood_camps')
+      );
+
+      const camps = campsSnapshot.docs.map(docSnap => ({
+        id: docSnap.id,
+        ...docSnap.data()
+      }));
+
+      // CALCULATE STATISTICS
+      const donors = userList.filter(
+        u => u.role === 'donor'
+      );
+
+      const pendingHospitals = hospitalList.filter(
+        h => !h.verified
+      );
+
+      const verifiedHospitals = hospitalList.filter(
+        h => h.verified
+      );
+
+      const pendingRequests = requests.filter(
+        r => r.status === 'Pending'
+      );
+
+      const completedDonations = userList.reduce(
+        (total, u) => total + (u.donation_count || 0),
+        0
+      );
+
+      const today = new Date()
+        .toISOString()
+        .split('T')[0];
+
+      const upcomingCamps = camps.filter(
+        c => c.date >= today
+      );
+
+      // Blood group statistics
+      const bloodGroupMap = {};
+
+      donors.forEach(donor => {
+        if (donor.blood_group) {
+          bloodGroupMap[donor.blood_group] =
+            (bloodGroupMap[donor.blood_group] || 0) + 1;
+        }
+      });
+
+      const bloodGroupStats = Object.entries(
+        bloodGroupMap
+      ).map(([blood_group, cnt]) => ({
+        blood_group,
+        cnt
+      }));
+
+      const calculatedStats = {
+        totalDonors: donors.length,
+        verifiedHospitals: verifiedHospitals.length,
+        completedDonations,
+        pendingRequests: pendingRequests.length,
+        upcomingCamps: upcomingCamps.length,
+        bloodGroupStats
+      };
+
+      setStats(calculatedStats);
+
+      // Dashboard information
+      const recentUsers = [...userList]
+        .sort((a, b) => {
+          const dateA = a.created_at?.toDate
+            ? a.created_at.toDate()
+            : new Date(a.created_at || 0);
+
+          const dateB = b.created_at?.toDate
+            ? b.created_at.toDate()
+            : new Date(b.created_at || 0);
+
+          return dateB - dateA;
+        })
+        .slice(0, 5);
+
+      setDash({
+        stats: {
+          users: userList.length,
+          hospitals: hospitalList.length,
+          pendingHospitals: pendingHospitals.length,
+          requests: requests.length
+        },
+        pendingHospitals,
+        recentUsers
+      });
+
+    } catch (error) {
+      console.error(
+        'Admin Firestore error:',
+        error
+      );
+
+      toast.error(
+        'Unable to load admin dashboard'
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+
+  // ─────────────────────────────────────
+  // INITIAL LOAD
+  // ─────────────────────────────────────
+
+  useEffect(() => {
+    if (user?.uid) {
+      loadAdminData();
+    }
+  }, [user?.uid]);
+
+
+  // ─────────────────────────────────────
+  // VERIFY HOSPITAL
+  // ─────────────────────────────────────
 
   const verify = async (id) => {
-    try { await api.put(`/admin/hospitals/${id}/verify`); toast.success('Hospital verified ✅'); Promise.all([api.get('/admin/dashboard'),api.get('/admin/hospitals')]).then(([d,h])=>{setDash(d.data);setHosps(h.data);}); }
-    catch { toast.error('Failed'); }
+    try {
+      await updateDoc(
+        doc(db, 'hospitals', id),
+        {
+          verified: true,
+          verified_at: serverTimestamp(),
+          verified_by: user.uid
+        }
+      );
+
+      toast.success(
+        'Hospital verified ✅'
+      );
+
+      loadAdminData();
+
+    } catch (error) {
+      console.error(
+        'Verify hospital error:',
+        error
+      );
+
+      toast.error(
+        'Failed to verify hospital'
+      );
+    }
   };
+
+
+  // ─────────────────────────────────────
+  // REJECT HOSPITAL
+  // ─────────────────────────────────────
+
   const reject = async (id) => {
-    if(!confirm('Reject and delete this hospital?')) return;
-    try { await api.put(`/admin/hospitals/${id}/reject`); toast.success('Rejected'); Promise.all([api.get('/admin/dashboard'),api.get('/admin/hospitals')]).then(([d,h])=>{setDash(d.data);setHosps(h.data);}); }
-    catch { toast.error('Failed'); }
+
+    if (
+      !window.confirm(
+        'Reject and delete this hospital?'
+      )
+    ) {
+      return;
+    }
+
+    try {
+      await deleteDoc(
+        doc(db, 'hospitals', id)
+      );
+
+      toast.success(
+        'Hospital rejected'
+      );
+
+      loadAdminData();
+
+    } catch (error) {
+      console.error(
+        'Reject hospital error:',
+        error
+      );
+
+      toast.error(
+        'Failed to reject hospital'
+      );
+    }
   };
+
+
+  // ─────────────────────────────────────
+  // SUSPEND USER
+  // ─────────────────────────────────────
+
   const suspend = async (id) => {
-    try { await api.put(`/admin/users/${id}/suspend`); toast.success('User suspended'); api.get('/admin/users').then(r=>setUsers(r.data)); }
-    catch { toast.error('Failed'); }
+
+    try {
+      await updateDoc(
+        doc(db, 'users', id),
+        {
+          is_active: false,
+          updated_at: serverTimestamp()
+        }
+      );
+
+      toast.success(
+        'User suspended'
+      );
+
+      loadAdminData();
+
+    } catch (error) {
+      console.error(
+        'Suspend user error:',
+        error
+      );
+
+      toast.error(
+        'Failed to suspend user'
+      );
+    }
   };
+
+
+  // ─────────────────────────────────────
+  // ACTIVATE USER
+  // ─────────────────────────────────────
+
   const activate = async (id) => {
-    try { await api.put(`/admin/users/${id}/activate`); toast.success('User re-activated'); api.get('/admin/users').then(r=>setUsers(r.data)); }
-    catch { toast.error('Failed'); }
+
+    try {
+      await updateDoc(
+        doc(db, 'users', id),
+        {
+          is_active: true,
+          updated_at: serverTimestamp()
+        }
+      );
+
+      toast.success(
+        'User re-activated'
+      );
+
+      loadAdminData();
+
+    } catch (error) {
+      console.error(
+        'Activate user error:',
+        error
+      );
+
+      toast.error(
+        'Failed to activate user'
+      );
+    }
   };
 
-  if(loading) return <div className="page loading"><div className="spinner"></div>Loading…</div>;
 
-  const chartData = stats?.bloodGroupStats && {
-    labels: stats.bloodGroupStats.map(b=>b.blood_group),
-    datasets: [{ label:'Donors', data: stats.bloodGroupStats.map(b=>b.cnt), backgroundColor:'#C8102E', borderRadius:6 }]
-  };
+  // ─────────────────────────────────────
+  // LOADING
+  // ─────────────────────────────────────
+
+  if (loading) {
+    return (
+      <div className="page loading">
+        <div className="spinner"></div>
+        Loading…
+      </div>
+    );
+  }
+
+
+  // ─────────────────────────────────────
+  // CHART
+  // ─────────────────────────────────────
+
+  const chartData =
+    stats?.bloodGroupStats && {
+      labels: stats.bloodGroupStats.map(
+        b => b.blood_group
+      ),
+
+      datasets: [
+        {
+          label: 'Donors',
+          data: stats.bloodGroupStats.map(
+            b => b.cnt
+          ),
+          backgroundColor: '#C8102E',
+          borderRadius: 6
+        }
+      ]
+    };
+
+
+  // ─────────────────────────────────────
+  // UI
+  // ─────────────────────────────────────
 
   return (
     <div className="page fade-in">
-      <div style={{ marginBottom:28,paddingBottom:22,borderBottom:'1px solid var(--border)' }}>
-        <div style={{ fontSize:'0.78rem',textTransform:'uppercase',letterSpacing:'0.08em',color:'var(--muted)',marginBottom:4 }}>Admin Panel</div>
-        <h1 style={{ fontSize:'1.8rem' }}>👑 System Administrator</h1>
-      </div>
 
-      <div className="grid-4" style={{ marginBottom:28 }}>
-        {[[dash?.stats?.users,'Total Users','👥'],[dash?.stats?.hospitals,'Hospitals','🏥'],[dash?.stats?.pendingHospitals,'Pending Verify','⏳'],[dash?.stats?.requests,'Blood Requests','🩸']].map(([n,l,i])=>(
-          <div key={l} className="stat-card"><div className="stat-num" style={{ color:l==='Pending Verify'&&n>0?'var(--warn)':'var(--red)' }}>{n||0}</div><div className="stat-lbl">{l}</div><div className="stat-ico">{i}</div></div>
-        ))}
-      </div>
-
-      <div className="tabs" style={{ marginBottom:24 }}>
-        {[['overview','📊 Overview'],['hospitals','🏥 Hospitals'],['users','👥 Users']].map(([k,l])=>(
-          <button key={k} className={`tab ${tab===k?'active':''}`} onClick={()=>setTab(k)}>{l}</button>
-        ))}
-      </div>
-
-      {tab==='overview' && (
-        <div>
-          {dash?.pendingHospitals?.length>0 && (
-            <div style={{ marginBottom:32 }}>
-              <div className="sec-title"><h2>⏳ Pending Verifications</h2><div className="sec-line"></div></div>
-              <div style={{ display:'flex',flexDirection:'column',gap:12 }}>
-                {dash.pendingHospitals.map(h=>(
-                  <div key={h.id} className="card" style={{ display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:12 }}>
-                    <div>
-                      <div style={{ fontWeight:700 }}>🏥 {h.hospital_name}</div>
-                      <div style={{ fontSize:'0.83rem',color:'var(--muted)' }}>{h.email} · {h.city} · {h.phone}</div>
-                      <div style={{ fontSize:'0.77rem',color:'var(--muted)' }}>Registered: {new Date(h.created_at).toLocaleDateString()}</div>
-                    </div>
-                    <div style={{ display:'flex',gap:10 }}>
-                      <button className="btn btn-success btn-sm" onClick={()=>verify(h.id)}>✅ Verify</button>
-                      <button className="btn btn-danger btn-sm" onClick={()=>reject(h.id)}>✕ Reject</button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-          <div className="grid-2" style={{ marginBottom:28 }}>
-            {chartData && (
-              <div className="card">
-                <h3 style={{ marginBottom:16 }}>Blood Group Distribution</h3>
-                <Bar data={chartData} options={{ responsive:true, plugins:{legend:{display:false}}, scales:{y:{beginAtZero:true}} }} />
-              </div>
-            )}
-            <div className="card">
-              <h3 style={{ marginBottom:16 }}>Platform Stats</h3>
-              {[[stats?.totalDonors,'Total Donors','💉'],[stats?.verifiedHospitals,'Verified Hospitals','🏥'],[stats?.completedDonations,'Completed Donations','🎉'],[stats?.pendingRequests,'Pending Requests','⏳'],[stats?.upcomingCamps,'Upcoming Camps','📅']].map(([v,l,i])=>(
-                <div key={l} style={{ display:'flex',justifyContent:'space-between',padding:'10px 0',borderBottom:'1px solid var(--border)' }}>
-                  <span style={{ fontSize:'0.9rem' }}>{i} {l}</span>
-                  <strong style={{ color:'var(--red)' }}>{v||0}</strong>
-                </div>
-              ))}
-            </div>
-          </div>
-          {dash?.recentUsers?.length>0 && (
-            <div>
-              <div className="sec-title"><h2>Recent Registrations</h2><div className="sec-line"></div></div>
-              <div className="tbl-wrap">
-                <table className="tbl">
-                  <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Blood</th><th>City</th><th>Joined</th></tr></thead>
-                  <tbody>
-                    {dash.recentUsers.map(u=>(
-                      <tr key={u.id}>
-                        <td><strong>{u.name}</strong></td>
-                        <td style={{ fontSize:'0.84rem' }}>{u.email}</td>
-                        <td><span className={`badge badge-${u.role==='donor'?'completed':'pending'}`}>{u.role}</span></td>
-                        <td><span className="bchip" style={{ width:28,height:28,fontSize:'0.68rem' }}>{u.blood_group}</span></td>
-                        <td>{u.city||'—'}</td>
-                        <td style={{ fontSize:'0.79rem',color:'var(--muted)' }}>{new Date(u.created_at).toLocaleDateString()}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
+      <div
+        style={{
+          marginBottom: 28,
+          paddingBottom: 22,
+          borderBottom:
+            '1px solid var(--border)'
+        }}
+      >
+        <div
+          style={{
+            fontSize: '0.78rem',
+            textTransform: 'uppercase',
+            letterSpacing: '0.08em',
+            color: 'var(--muted)',
+            marginBottom: 4
+          }}
+        >
+          Admin Panel
         </div>
+
+        <h1 style={{ fontSize: '1.8rem' }}>
+          👑 System Administrator
+        </h1>
+      </div>
+
+
+      {/* STATISTICS */}
+
+      <div
+        className="grid-4"
+        style={{ marginBottom: 28 }}
+      >
+
+        {[
+          [
+            dash?.stats?.users,
+            'Total Users',
+            '👥'
+          ],
+
+          [
+            dash?.stats?.hospitals,
+            'Hospitals',
+            '🏥'
+          ],
+
+          [
+            dash?.stats?.pendingHospitals,
+            'Pending Verify',
+            '⏳'
+          ],
+
+          [
+            dash?.stats?.requests,
+            'Blood Requests',
+            '🩸'
+          ]
+
+        ].map(([n, l, i]) => (
+
+          <div
+            key={l}
+            className="stat-card"
+          >
+            <div
+              className="stat-num"
+              style={{
+                color:
+                  l === 'Pending Verify' &&
+                  n > 0
+                    ? 'var(--warn)'
+                    : 'var(--red)'
+              }}
+            >
+              {n || 0}
+            </div>
+
+            <div className="stat-lbl">
+              {l}
+            </div>
+
+            <div className="stat-ico">
+              {i}
+            </div>
+          </div>
+
+        ))}
+
+      </div>
+
+
+      {/* TABS */}
+
+      <div
+        className="tabs"
+        style={{ marginBottom: 24 }}
+      >
+
+        {[
+          ['overview', '📊 Overview'],
+          ['hospitals', '🏥 Hospitals'],
+          ['users', '👥 Users']
+        ].map(([key, label]) => (
+
+          <button
+            key={key}
+            className={`tab ${
+              tab === key ? 'active' : ''
+            }`}
+            onClick={() => setTab(key)}
+          >
+            {label}
+          </button>
+
+        ))}
+
+      </div>
+
+
+      {/* OVERVIEW */}
+
+      {tab === 'overview' && (
+
+        <div>
+
+          {/* PENDING HOSPITALS */}
+
+          {dash?.pendingHospitals?.length > 0 && (
+
+            <div style={{ marginBottom: 32 }}>
+
+              <div className="sec-title">
+                <h2>
+                  ⏳ Pending Verifications
+                </h2>
+
+                <div className="sec-line"></div>
+              </div>
+
+              <div
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 12
+                }}
+              >
+
+                {dash.pendingHospitals.map(h => (
+
+                  <div
+                    key={h.id}
+                    className="card"
+                    style={{
+                      display: 'flex',
+                      justifyContent:
+                        'space-between',
+                      alignItems: 'center',
+                      flexWrap: 'wrap',
+                      gap: 12
+                    }}
+                  >
+
+                    <div>
+
+                      <div
+                        style={{ fontWeight: 700 }}
+                      >
+                        🏥 {h.hospital_name}
+                      </div>
+
+                      <div
+                        style={{
+                          fontSize: '0.83rem',
+                          color: 'var(--muted)'
+                        }}
+                      >
+                        {h.email} · {h.city} · {h.phone}
+                      </div>
+
+                      <div
+                        style={{
+                          fontSize: '0.77rem',
+                          color: 'var(--muted)'
+                        }}
+                      >
+                        Registered:{' '}
+                        {h.created_at
+                          ? new Date(
+                              h.created_at?.toDate
+                                ? h.created_at.toDate()
+                                : h.created_at
+                            ).toLocaleDateString()
+                          : '—'}
+                      </div>
+
+                    </div>
+
+                    <div
+                      style={{
+                        display: 'flex',
+                        gap: 10
+                      }}
+                    >
+
+                      <button
+                        className="btn btn-success btn-sm"
+                        onClick={() =>
+                          verify(h.id)
+                        }
+                      >
+                        ✅ Verify
+                      </button>
+
+                      <button
+                        className="btn btn-danger btn-sm"
+                        onClick={() =>
+                          reject(h.id)
+                        }
+                      >
+                        ✕ Reject
+                      </button>
+
+                    </div>
+
+                  </div>
+
+                ))}
+
+              </div>
+
+            </div>
+
+          )}
+
+
+          {/* CHART + STATS */}
+
+          <div
+            className="grid-2"
+            style={{ marginBottom: 28 }}
+          >
+
+            {chartData && (
+
+              <div className="card">
+
+                <h3
+                  style={{ marginBottom: 16 }}
+                >
+                  Blood Group Distribution
+                </h3>
+
+                <Bar
+                  data={chartData}
+                  options={{
+                    responsive: true,
+                    plugins: {
+                      legend: {
+                        display: false
+                      }
+                    },
+                    scales: {
+                      y: {
+                        beginAtZero: true
+                      }
+                    }
+                  }}
+                />
+
+              </div>
+
+            )}
+
+
+            <div className="card">
+
+              <h3
+                style={{ marginBottom: 16 }}
+              >
+                Platform Stats
+              </h3>
+
+              {[
+                [
+                  stats?.totalDonors,
+                  'Total Donors',
+                  '💉'
+                ],
+
+                [
+                  stats?.verifiedHospitals,
+                  'Verified Hospitals',
+                  '🏥'
+                ],
+
+                [
+                  stats?.completedDonations,
+                  'Completed Donations',
+                  '🎉'
+                ],
+
+                [
+                  stats?.pendingRequests,
+                  'Pending Requests',
+                  '⏳'
+                ],
+
+                [
+                  stats?.upcomingCamps,
+                  'Upcoming Camps',
+                  '📅'
+                ]
+
+              ].map(([value, label, icon]) => (
+
+                <div
+                  key={label}
+                  style={{
+                    display: 'flex',
+                    justifyContent:
+                      'space-between',
+                    padding: '10px 0',
+                    borderBottom:
+                      '1px solid var(--border)'
+                  }}
+                >
+
+                  <span
+                    style={{ fontSize: '0.9rem' }}
+                  >
+                    {icon} {label}
+                  </span>
+
+                  <strong
+                    style={{
+                      color: 'var(--red)'
+                    }}
+                  >
+                    {value || 0}
+                  </strong>
+
+                </div>
+
+              ))}
+
+            </div>
+
+          </div>
+
+
+          {/* RECENT USERS */}
+
+          {dash?.recentUsers?.length > 0 && (
+
+            <div>
+
+              <div className="sec-title">
+                <h2>
+                  Recent Registrations
+                </h2>
+
+                <div className="sec-line"></div>
+              </div>
+
+              <div className="tbl-wrap">
+
+                <table className="tbl">
+
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Email</th>
+                      <th>Role</th>
+                      <th>Blood</th>
+                      <th>City</th>
+                      <th>Joined</th>
+                    </tr>
+                  </thead>
+
+                  <tbody>
+
+                    {dash.recentUsers.map(u => (
+
+                      <tr key={u.id}>
+
+                        <td>
+                          <strong>
+                            {u.name}
+                          </strong>
+                        </td>
+
+                        <td
+                          style={{
+                            fontSize: '0.84rem'
+                          }}
+                        >
+                          {u.email}
+                        </td>
+
+                        <td>
+                          <span
+                            className={`badge ${
+                              u.role === 'donor'
+                                ? 'badge-completed'
+                                : 'badge-pending'
+                            }`}
+                          >
+                            {u.role}
+                          </span>
+                        </td>
+
+                        <td>
+                          <span
+                            className="bchip"
+                            style={{
+                              width: 28,
+                              height: 28,
+                              fontSize: '0.68rem'
+                            }}
+                          >
+                            {u.blood_group}
+                          </span>
+                        </td>
+
+                        <td>
+                          {u.city || '—'}
+                        </td>
+
+                        <td
+                          style={{
+                            fontSize: '0.79rem',
+                            color: 'var(--muted)'
+                          }}
+                        >
+                          {u.created_at
+                            ? new Date(
+                                u.created_at?.toDate
+                                  ? u.created_at.toDate()
+                                  : u.created_at
+                              ).toLocaleDateString()
+                            : '—'}
+                        </td>
+
+                      </tr>
+
+                    ))}
+
+                  </tbody>
+
+                </table>
+
+              </div>
+
+            </div>
+
+          )}
+
+        </div>
+
       )}
 
-      {tab==='hospitals' && (
-        hosps.length===0 ? <div className="empty"><div className="ico">🏥</div><p>No hospitals registered.</p></div> : (
+
+      {/* HOSPITALS */}
+
+      {tab === 'hospitals' && (
+
+        hosps.length === 0 ? (
+
+          <div className="empty">
+            <div className="ico">🏥</div>
+            <p>
+              No hospitals registered.
+            </p>
+          </div>
+
+        ) : (
+
           <div className="tbl-wrap">
+
             <table className="tbl">
-              <thead><tr><th>Hospital</th><th>Email</th><th>City</th><th>Phone</th><th>Status</th><th>Registered</th><th>Action</th></tr></thead>
+
+              <thead>
+                <tr>
+                  <th>Hospital</th>
+                  <th>Email</th>
+                  <th>City</th>
+                  <th>Phone</th>
+                  <th>Status</th>
+                  <th>Registered</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+
               <tbody>
-                {hosps.map(h=>(
+
+                {hosps.map(h => (
+
                   <tr key={h.id}>
-                    <td><strong>{h.hospital_name}</strong></td>
-                    <td style={{ fontSize:'0.83rem' }}>{h.email}</td>
-                    <td>{h.city}</td>
-                    <td style={{ fontSize:'0.83rem' }}>{h.phone}</td>
-                    <td><span className={`badge badge-${h.verified?'verified':'unverified'}`}>{h.verified?'✅ Verified':'⏳ Pending'}</span></td>
-                    <td style={{ fontSize:'0.79rem',color:'var(--muted)' }}>{new Date(h.created_at).toLocaleDateString()}</td>
-                    <td>{!h.verified && <div style={{ display:'flex',gap:6 }}><button className="btn btn-success btn-sm" onClick={()=>verify(h.id)}>✅</button><button className="btn btn-danger btn-sm" onClick={()=>reject(h.id)}>✕</button></div>}</td>
+
+                    <td>
+                      <strong>
+                        {h.hospital_name}
+                      </strong>
+                    </td>
+
+                    <td
+                      style={{
+                        fontSize: '0.83rem'
+                      }}
+                    >
+                      {h.email}
+                    </td>
+
+                    <td>
+                      {h.city}
+                    </td>
+
+                    <td
+                      style={{
+                        fontSize: '0.83rem'
+                      }}
+                    >
+                      {h.phone}
+                    </td>
+
+                    <td>
+
+                      <span
+                        className={`badge ${
+                          h.verified
+                            ? 'badge-verified'
+                            : 'badge-unverified'
+                        }`}
+                      >
+                        {h.verified
+                          ? '✅ Verified'
+                          : '⏳ Pending'}
+                      </span>
+
+                    </td>
+
+                    <td
+                      style={{
+                        fontSize: '0.79rem',
+                        color: 'var(--muted)'
+                      }}
+                    >
+                      {h.created_at
+                        ? new Date(
+                            h.created_at?.toDate
+                              ? h.created_at.toDate()
+                              : h.created_at
+                          ).toLocaleDateString()
+                        : '—'}
+                    </td>
+
+                    <td>
+
+                      {!h.verified && (
+
+                        <div
+                          style={{
+                            display: 'flex',
+                            gap: 6
+                          }}
+                        >
+
+                          <button
+                            className="btn btn-success btn-sm"
+                            onClick={() =>
+                              verify(h.id)
+                            }
+                          >
+                            ✅
+                          </button>
+
+                          <button
+                            className="btn btn-danger btn-sm"
+                            onClick={() =>
+                              reject(h.id)
+                            }
+                          >
+                            ✕
+                          </button>
+
+                        </div>
+
+                      )}
+
+                    </td>
+
                   </tr>
+
                 ))}
+
               </tbody>
+
             </table>
+
           </div>
+
         )
+
       )}
 
-      {tab==='users' && (
-        users.length===0 ? <div className="empty"><div className="ico">👥</div><p>No users.</p></div> : (
-          <div className="tbl-wrap">
-            <table className="tbl">
-              <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Blood</th><th>City</th><th>Donations</th><th>Badge</th><th>Status</th><th>Action</th></tr></thead>
-              <tbody>
-                {users.map(u=>(
-                  <tr key={u.id}>
-                    <td><strong>{u.name}</strong></td>
-                    <td style={{ fontSize:'0.82rem' }}>{u.email}</td>
-                    <td><span className={`badge badge-${u.role==='donor'?'completed':'pending'}`}>{u.role}</span></td>
-                    <td><span className="bchip" style={{ width:26,height:26,fontSize:'0.65rem' }}>{u.blood_group}</span></td>
-                    <td>{u.city||'—'}</td>
-                    <td style={{ textAlign:'center' }}>{u.donation_count}</td>
-                    <td style={{ fontSize:'0.82rem' }}>{u.badge||'—'}</td>
-                    <td><span className={`badge badge-${u.is_active?'completed':'cancelled'}`}>{u.is_active?'Active':'Suspended'}</span></td>
-                    <td>
-                      {u.is_active
-                        ? <button className="btn btn-danger btn-sm" onClick={()=>suspend(u.id)}>Suspend</button>
-                        : <button className="btn btn-success btn-sm" onClick={()=>activate(u.id)}>Activate</button>}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+
+      {/* USERS */}
+
+      {tab === 'users' && (
+
+        users.length === 0 ? (
+
+          <div className="empty">
+            <div className="ico">👥</div>
+            <p>No users.</p>
           </div>
+
+        ) : (
+
+          <div className="tbl-wrap">
+
+            <table className="tbl">
+
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Email</th>
+                  <th>Role</th>
+                  <th>Blood</th>
+                  <th>City</th>
+                  <th>Donations</th>
+                  <th>Badge</th>
+                  <th>Status</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+
+              <tbody>
+
+                {users.map(u => (
+
+                  <tr key={u.id}>
+
+                    <td>
+                      <strong>
+                        {u.name}
+                      </strong>
+                    </td>
+
+                    <td
+                      style={{
+                        fontSize: '0.82rem'
+                      }}
+                    >
+                      {u.email}
+                    </td>
+
+                    <td>
+                      <span
+                        className={`badge ${
+                          u.role === 'donor'
+                            ? 'badge-completed'
+                            : 'badge-pending'
+                        }`}
+                      >
+                        {u.role}
+                      </span>
+                    </td>
+
+                    <td>
+
+                      <span
+                        className="bchip"
+                        style={{
+                          width: 26,
+                          height: 26,
+                          fontSize: '0.65rem'
+                        }}
+                      >
+                        {u.blood_group}
+                      </span>
+
+                    </td>
+
+                    <td>
+                      {u.city || '—'}
+                    </td>
+
+                    <td
+                      style={{
+                        textAlign: 'center'
+                      }}
+                    >
+                      {u.donation_count || 0}
+                    </td>
+
+                    <td>
+                      {u.badge || '—'}
+                    </td>
+
+                    <td>
+
+                      <span
+                        className={`badge ${
+                          u.is_active === false
+                            ? 'badge-cancelled'
+                            : 'badge-completed'
+                        }`}
+                      >
+                        {u.is_active === false
+                          ? 'Suspended'
+                          : 'Active'}
+                      </span>
+
+                    </td>
+
+                    <td>
+
+                      {u.is_active === false ? (
+
+                        <button
+                          className="btn btn-success btn-sm"
+                          onClick={() =>
+                            activate(u.id)
+                          }
+                        >
+                          Activate
+                        </button>
+
+                      ) : (
+
+                        <button
+                          className="btn btn-danger btn-sm"
+                          onClick={() =>
+                            suspend(u.id)
+                          }
+                        >
+                          Suspend
+                        </button>
+
+                      )}
+
+                    </td>
+
+                  </tr>
+
+                ))}
+
+              </tbody>
+
+            </table>
+
+          </div>
+
         )
+
       )}
+
     </div>
   );
 }
@@ -322,20 +2312,131 @@ export function BloodCamps() {
   const [loading, setLoading] = useState(true);
   const [city, setCity] = useState('');
 
-  const load = async () => {
-    setLoading(true);
-    try { const r = await api.get('/blood-camps', { params: city?{city}:{} }); setCamps(r.data); }
-    catch {} setLoading(false);
-  };
+const load = async () => {
+  setLoading(true);
+
+  try {
+    const campsQuery = query(
+      collection(db, 'blood_camps')
+    );
+
+    const snapshot = await getDocs(campsQuery);
+
+    let campList = snapshot.docs.map(docSnap => ({
+      id: docSnap.id,
+      ...docSnap.data()
+    }));
+
+    // Filter by city on the client side
+    if (city.trim()) {
+      const searchCity = city.trim().toLowerCase();
+
+      campList = campList.filter(
+        camp => camp.city?.toLowerCase() === searchCity
+      );
+    }
+
+    // Show only upcoming camps
+    const today = new Date().toISOString().split('T')[0];
+
+    campList = campList.filter(
+      camp => camp.date >= today
+    );
+
+    // Sort by date
+    campList.sort(
+      (a, b) => new Date(a.date) - new Date(b.date)
+    );
+
+    setCamps(campList);
+
+  } catch (error) {
+    console.error('Load blood camps error:', error);
+    toast.error('Unable to load blood camps');
+  } finally {
+    setLoading(false);
+  }
+};
 
   useEffect(() => { load(); }, []);
 
-  const register = async (id) => {
-    if (!user) { toast.error('Please login to register'); return; }
-    try { await api.post(`/blood-camps/${id}/register`); toast.success('Registered for camp! 📅'); load(); }
-    catch (err) { toast.error(err.response?.data?.message||'Failed'); }
-  };
+const register = async (id) => {
+  if (!user) {
+    toast.error('Please login to register');
+    return;
+  }
 
+  try {
+    // Registration document uses the user's UID
+    const registrationRef = doc(
+      db,
+      'blood_camps',
+      id,
+      'registrations',
+      user.uid
+    );
+
+    // Check if already registered
+    const registrationSnapshot = await getDoc(registrationRef);
+
+    if (registrationSnapshot.exists()) {
+      toast.error('You have already registered for this camp');
+      return;
+    }
+
+    // Get the camp
+    const campRef = doc(db, 'blood_camps', id);
+    const campSnapshot = await getDoc(campRef);
+
+    if (!campSnapshot.exists()) {
+      toast.error('Blood camp not found');
+      return;
+    }
+
+    const campData = campSnapshot.data();
+
+    const currentCount = campData.registered_count || 0;
+    const maxParticipants = campData.max_participants || 0;
+
+    // Check capacity
+    if (currentCount >= maxParticipants) {
+      toast.error('This blood camp is already full');
+      return;
+    }
+
+    // Create registration using donor UID as document ID
+    await setDoc(registrationRef, {
+      user_id: user.uid,
+      user_name: user.name || '',
+      user_email: user.email || '',
+      registered_at: serverTimestamp()
+    });
+
+    // Increase registered count
+    await updateDoc(campRef, {
+      registered_count: currentCount + 1,
+      updated_at: serverTimestamp()
+    });
+
+    // Update screen immediately
+    setCamps(prev =>
+      prev.map(camp =>
+        camp.id === id
+          ? {
+              ...camp,
+              registered_count: currentCount + 1
+            }
+          : camp
+      )
+    );
+
+    toast.success('Registered for camp! 📅');
+
+  } catch (error) {
+    console.error('Camp registration error:', error);
+    toast.error('Failed to register for camp');
+  }
+};
   return (
     <div className="page">
       <div style={{ textAlign:'center',marginBottom:36 }} className="fade-in">

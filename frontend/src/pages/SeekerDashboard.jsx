@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import toast from 'react-hot-toast';
-import api from '../utils/api';
 import {
   collection,
   query,
@@ -68,8 +67,20 @@ const load = async () => {
     setRequests(requestList);
 
     // Hospitals are still loaded from the existing backend
-    const h = await api.get('/hospitals');
-    setHospitals(h.data);
+// Load verified hospitals from Firestore
+const hospitalsQuery = query(
+  collection(db, 'hospitals'),
+  where('verified', '==', true)
+);
+
+const hospitalSnapshot = await getDocs(hospitalsQuery);
+
+const hospitalList = hospitalSnapshot.docs.map(docSnap => ({
+  id: docSnap.id,
+  ...docSnap.data()
+}));
+
+setHospitals(hospitalList);
 
   } catch (error) {
 
@@ -86,14 +97,25 @@ const load = async () => {
 
   const set = (k,v) => setForm(f => ({...f,[k]:v}));
 
-  const pickHospital = (id) => {
-    const h = hospitals.find(x => String(x.id) === String(id));
-    setForm(f => ({...f, hospital_id:id, hospital_name:h?.hospital_name||'', city:f.city||h?.city||''}));
-  };
+const pickHospital = (id) => {
+  const h = hospitals.find(x => x.id === id);
+
+  setForm(f => ({
+    ...f,
+    hospital_id: id,
+    hospital_name: h?.hospital_name || '',
+    city: f.city || h?.city || ''
+  }));
+};
 
 const submit = async (e) => {
   e.preventDefault();
 
+  // Hospital must be selected
+  if (!form.hospital_id) {
+    toast.error('Please select a verified hospital');
+    return;
+  }
   setSubmitting(true);
 
   try {
@@ -109,8 +131,8 @@ const submit = async (e) => {
       emergency_level: form.emergency_level,
       description: form.description,
 
-      hospital_id: form.hospital_id || '',
-      hospital_name: form.hospital_name || '',
+hospital_id: form.hospital_id,
+hospital_name: form.hospital_name,
       city: form.city.trim().toLowerCase(),
 
       status: 'Pending',
@@ -392,17 +414,21 @@ const complete = async (id) => {
             </div>
             <div className="form-group">
               <label className="form-label">Hospital (Verified)</label>
-              <select className="form-control" value={form.hospital_id} onChange={e=>pickHospital(e.target.value)}>
-                <option value="">— Select verified hospital (optional) —</option>
-                {hospitals.map(h=><option key={h.id} value={h.id}>🏥 {h.hospital_name} — {h.city}</option>)}
-              </select>
+<select
+  className="form-control"
+  value={form.hospital_id}
+  onChange={e => pickHospital(e.target.value)}
+  required
+>
+  <option value="">— Select verified hospital —</option>
+
+  {hospitals.map(h => (
+    <option key={h.id} value={h.id}>
+      🏥 {h.hospital_name} — {h.city}
+    </option>
+  ))}
+</select>
             </div>
-            {!form.hospital_id && (
-              <div className="form-group">
-                <label className="form-label">Hospital Name (if not verified)</label>
-                <input className="form-control" placeholder="Hospital name" value={form.hospital_name} onChange={e=>set('hospital_name',e.target.value)} />
-              </div>
-            )}
             <div className="form-group">
               <label className="form-label">City</label>
               <input className="form-control" placeholder="City where blood is needed" value={form.city} onChange={e=>set('city',e.target.value)} required />

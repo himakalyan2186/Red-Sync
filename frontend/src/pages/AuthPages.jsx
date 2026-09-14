@@ -3,8 +3,16 @@ import { Link, useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
 import { useAuth } from '../context/AuthContext';
-import { createUserWithEmailAndPassword } from 'firebase/auth';
-import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
+import {
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword
+} from 'firebase/auth';
+import {
+  doc,
+  setDoc,
+  getDoc,
+  serverTimestamp
+} from 'firebase/firestore';
 import { auth, db } from '../firebase';
 
 
@@ -27,23 +35,147 @@ const AuthLayout = ({ visual, children }) => (
 export function Login() {
   const [form, setForm] = useState({ email:'', password:'', type:'user' });
   const [loading, setLoading] = useState(false);
-  const { login } = useAuth();
+  const { login, setAuthenticatedUser } = useAuth();  
   const navigate = useNavigate();
 
-  const submit = async (e) => {
-    e.preventDefault(); setLoading(true);
-    try {
-      const ep = form.type==='hospital' ? '/auth/hospital/login' : '/auth/login';
-      const { data } = await api.post(ep, { email:form.email, password:form.password });
-      const u = data.user || data.hospital;
-      if (form.type==='hospital') u.role='hospital';
-      login(data.token, u);
-      toast.success(`Welcome back, ${u.name||u.hospital_name}! 👋`);
-      navigate('/dashboard');
-    } catch (err) { toast.error(err.response?.data?.message||'Login failed'); }
-    setLoading(false);
-  };
+const submit = async (e) => {
+  e.preventDefault();
+  setLoading(true);
 
+  try {
+
+    // ─────────────────────────────────────
+    // HOSPITAL LOGIN
+    // ─────────────────────────────────────
+
+    if (form.type === 'hospital') {
+
+      const result = await signInWithEmailAndPassword(
+        auth,
+        form.email,
+        form.password
+      );
+
+      const firebaseUser = result.user;
+
+      const hospitalSnapshot = await getDoc(
+        doc(db, 'hospitals', firebaseUser.uid)
+      );
+
+      if (!hospitalSnapshot.exists()) {
+        await auth.signOut();
+        toast.error('Hospital profile not found');
+        return;
+      }
+
+      const hospital = hospitalSnapshot.data();
+
+      setAuthenticatedUser({
+        uid: firebaseUser.uid,
+        email: firebaseUser.email,
+        name: hospital.hospital_name,
+        hospital_name: hospital.hospital_name,
+        address: hospital.address,
+        city: hospital.city,
+        pincode: hospital.pincode,
+        phone: hospital.phone,
+        role: 'hospital',
+        verified: hospital.verified || false
+      });
+
+      toast.success(
+        `Welcome back, ${hospital.hospital_name}! 👋`
+      );
+
+      navigate('/dashboard');
+      return;
+    }
+
+
+    // ─────────────────────────────────────
+    // NORMAL USER LOGIN → FIREBASE
+    // ─────────────────────────────────────
+
+    const result = await signInWithEmailAndPassword(
+      auth,
+      form.email,
+      form.password
+    );
+
+    const firebaseUser = result.user;
+
+    // Get user's Firestore profile
+    const userSnapshot = await getDoc(
+      doc(db, 'users', firebaseUser.uid)
+    );
+
+    if (!userSnapshot.exists()) {
+      await auth.signOut();
+      toast.error('User profile not found');
+      return;
+    }
+
+    const userData = userSnapshot.data();
+
+    // Check whether account is suspended
+    if (userData.is_active === false) {
+      await auth.signOut();
+      toast.error('Your account has been suspended');
+      return;
+    }
+
+    // Store complete user information in AuthContext
+    setAuthenticatedUser({
+      uid: firebaseUser.uid,
+      email: firebaseUser.email,
+      name: userData.name,
+      blood_group: userData.blood_group,
+      age: userData.age,
+      gender: userData.gender,
+      phone: userData.phone,
+      city: userData.city,
+      role: userData.role || 'seeker',
+      last_donation_date: userData.last_donation_date,
+      donation_count: userData.donation_count || 0,
+      badge: userData.badge || null,
+      is_active: userData.is_active !== false
+    });
+
+    toast.success(
+      `Welcome back, ${userData.name}! 👋`
+    );
+
+    navigate('/dashboard');
+
+  } catch (error) {
+
+    console.error('Firebase login error:', error);
+
+    if (
+      error.code === 'auth/invalid-credential' ||
+      error.code === 'auth/user-not-found' ||
+      error.code === 'auth/wrong-password'
+    ) {
+      toast.error('Invalid email or password');
+
+    } else if (error.code === 'auth/invalid-email') {
+      toast.error('Invalid email address');
+
+    } else if (error.code === 'auth/too-many-requests') {
+      toast.error(
+        'Too many login attempts. Please try again later.'
+      );
+
+    } else {
+      toast.error(
+        error.message || 'Login failed'
+      );
+    }
+
+  } finally {
+    setLoading(false);
+  }
+};
   return (
     <AuthLayout visual={<>
       <div style={{ fontSize:'3.5rem', marginBottom:20, animation:'heartbeat 2.5s ease-in-out infinite' }}>🩸</div>
@@ -204,20 +336,82 @@ export function Register() {
 export function HospitalRegister() {
   const [form, setForm] = useState({ hospital_name:'', email:'', password:'', address:'', city:'', pincode:'', phone:'' });
   const [loading, setLoading] = useState(false);
-  const { login } = useAuth();
+  const { setAuthenticatedUser } = useAuth();
   const navigate = useNavigate();
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
 
-  const submit = async (e) => {
-    e.preventDefault(); setLoading(true);
-    try {
-      const { data } = await api.post('/auth/hospital/register', form);
-      login(data.token, {...data.hospital, role:'hospital', name:data.hospital.hospital_name});
-      toast.success('Hospital registered! Awaiting admin verification 🏥');
-      navigate('/dashboard');
-    } catch (err) { toast.error(err.response?.data?.message||'Registration failed'); }
+const submit = async (e) => {
+  e.preventDefault();
+
+  if (form.password.length < 6) {
+    return toast.error('Password must be at least 6 characters');
+  }
+
+  setLoading(true);
+
+  try {
+    // 1. Create Firebase Authentication account
+    const result = await createUserWithEmailAndPassword(
+      auth,
+      form.email,
+      form.password
+    );
+
+    const firebaseUser = result.user;
+
+    // 2. Store hospital information in Firestore
+    await setDoc(doc(db, 'hospitals', firebaseUser.uid), {
+      uid: firebaseUser.uid,
+      hospital_name: form.hospital_name,
+      email: form.email,
+      address: form.address,
+      city: form.city,
+      pincode: form.pincode,
+      phone: form.phone,
+
+      // Hospital must be verified by admin
+      verified: false,
+
+      createdAt: serverTimestamp()
+    });
+
+    // 3. Update AuthContext
+    setAuthenticatedUser({
+      uid: firebaseUser.uid,
+      email: firebaseUser.email,
+      name: form.hospital_name,
+      hospital_name: form.hospital_name,
+      address: form.address,
+      city: form.city,
+      pincode: form.pincode,
+      phone: form.phone,
+      role: 'hospital',
+      verified: false
+    });
+
+    toast.success(
+      'Hospital registered! Awaiting admin verification 🏥'
+    );
+
+    navigate('/dashboard');
+
+  } catch (err) {
+    console.error('Firebase hospital registration error:', err);
+
+    if (err.code === 'auth/email-already-in-use') {
+      toast.error('This email is already registered');
+    } else if (err.code === 'auth/invalid-email') {
+      toast.error('Invalid email address');
+    } else if (err.code === 'auth/weak-password') {
+      toast.error('Password is too weak');
+    } else {
+      toast.error(err.message || 'Registration failed');
+    }
+
+  } finally {
     setLoading(false);
-  };
+  }
+};
 
   return (
     <AuthLayout visual={<>
