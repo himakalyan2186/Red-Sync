@@ -1,13 +1,136 @@
 // ── Home.jsx ─────────────────────────────────────────────────────────────────
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import api from '../utils/api';
+
+import {
+  collection,
+  getDocs,
+  query,
+  where
+} from 'firebase/firestore';
+
+import { db } from '../firebase';
 
 export function Home() {
-  const [stats, setStats] = useState(null);
-  useEffect(() => { api.get('/stats').then(r=>setStats(r.data)).catch(()=>{}); }, []);
-  const BGs = ['A+','A-','B+','B-','AB+','AB-','O+','O-'];
+const [stats, setStats] = useState(null);
+const BGs = ['A+','A-','B+','B-','AB+','AB-','O+','O-'];
 
+useEffect(() => {
+  const loadStats = async () => {
+
+    // Default values
+    let totalDonors = 0;
+    let verifiedHospitals = 0;
+    let completedDonations = 0;
+    let bloodGroupStats = [];
+    let recentDonations = [];
+
+    // =========================
+    // DONORS
+    // =========================
+    try {
+      const donorsSnapshot = await getDocs(
+        query(
+          collection(db, 'users'),
+          where('role', '==', 'donor')
+        )
+      );
+
+      totalDonors = donorsSnapshot.size;
+
+      const counts = {};
+
+      donorsSnapshot.docs.forEach(docSnap => {
+        const donor = docSnap.data();
+
+        if (donor.blood_group) {
+          counts[donor.blood_group] =
+            (counts[donor.blood_group] || 0) + 1;
+        }
+      });
+
+      bloodGroupStats = Object.entries(counts).map(
+        ([blood_group, cnt]) => ({
+          blood_group,
+          cnt
+        })
+      );
+
+    } catch (error) {
+      console.error('Donor stats error:', error);
+    }
+
+
+    // =========================
+    // VERIFIED HOSPITALS
+    // =========================
+    try {
+      const hospitalsSnapshot = await getDocs(
+        query(
+          collection(db, 'hospitals'),
+          where('verified', '==', true)
+        )
+      );
+
+      verifiedHospitals = hospitalsSnapshot.size;
+
+    } catch (error) {
+      console.error('Hospital stats error:', error);
+    }
+
+
+    // =========================
+    // DONATIONS
+    // =========================
+    // This collection may not exist yet.
+    // That is completely okay.
+    try {
+      const donationsSnapshot = await getDocs(
+        query(
+          collection(db, 'donations'),
+          where('status', '==', 'Completed')
+        )
+      );
+
+      completedDonations = donationsSnapshot.size;
+
+      recentDonations = donationsSnapshot.docs
+        .map(docSnap => ({
+          id: docSnap.id,
+          ...docSnap.data()
+        }))
+        .sort((a, b) => {
+          const dateA = a.donation_date?.toDate
+            ? a.donation_date.toDate()
+            : new Date(a.donation_date || 0);
+
+          const dateB = b.donation_date?.toDate
+            ? b.donation_date.toDate()
+            : new Date(b.donation_date || 0);
+
+          return dateB - dateA;
+        })
+        .slice(0, 5);
+
+    } catch (error) {
+      console.log('No donation records yet.');
+    }
+
+
+    // =========================
+    // SET STATS
+    // =========================
+    setStats({
+      totalDonors,
+      completedDonations,
+      verifiedHospitals,
+      bloodGroupStats,
+      recentDonations
+    });
+  };
+
+  loadStats();
+}, []);
   return (
     <div>
       {/* Hero */}

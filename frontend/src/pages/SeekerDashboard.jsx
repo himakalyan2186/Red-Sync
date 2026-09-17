@@ -9,6 +9,8 @@ import {
   addDoc,
   updateDoc,
   doc,
+  getDoc,
+  setDoc,
   serverTimestamp
 } from 'firebase/firestore';
 
@@ -213,32 +215,116 @@ const cancel = async (id) => {
 };
 
 const complete = async (id) => {
-
   try {
+    // Get the blood request
+    const requestRef = doc(db, 'blood_requests', id);
+    const requestSnapshot = await getDoc(requestRef);
 
-    await updateDoc(
-      doc(db, 'blood_requests', id),
-      {
-        status: 'Completed',
-        updated_at: serverTimestamp()
-      }
-    );
+    if (!requestSnapshot.exists()) {
+      toast.error('Blood request not found');
+      return;
+    }
+
+    const requestData = requestSnapshot.data();
+
+    // Make sure a donor accepted the request
+    if (!requestData.accepted_by) {
+      toast.error('No donor has accepted this request');
+      return;
+    }
+
+    // Donor UID
+    const donorId = requestData.accepted_by;
+
+    // Get donor profile
+    const donorRef = doc(db, 'users', donorId);
+    const donorSnapshot = await getDoc(donorRef);
+
+    if (!donorSnapshot.exists()) {
+      toast.error('Donor profile not found');
+      return;
+    }
+
+    const donorData = donorSnapshot.data();
+
+    // Current donation count
+    const currentCount = donorData.donation_count || 0;
+
+    // New donation count
+    const newCount = currentCount + 1;
+
+    // Calculate badge
+    let newBadge = 'Helper';
+
+    if (newCount >= 25) {
+      newBadge = 'Life Anchor';
+    } else if (newCount >= 10) {
+      newBadge = 'Hero';
+    } else if (newCount >= 5) {
+      newBadge = 'Lifesaver';
+    }
+
+    // Create donation record
+    await addDoc(collection(db, 'donations'), {
+      donor_id: donorId,
+      donor_name: donorData.name || requestData.donor_name || '',
+      donor_email: donorData.email || '',
+      donor_blood_group:
+        donorData.blood_group ||
+        requestData.donor_blood_group ||
+        '',
+      donor_city:
+        donorData.city ||
+        requestData.donor_city ||
+        '',
+
+      requester_id: requestData.requester_uid || '',
+      requester_name: requestData.requester_name || '',
+
+      hospital_id: requestData.hospital_id || '',
+      hospital_name: requestData.hospital_name || '',
+
+      blood_group: requestData.blood_group || '',
+      units: Number(requestData.units || 1),
+
+      request_id: id,
+
+      status: 'Completed',
+
+      donation_date: serverTimestamp(),
+      created_at: serverTimestamp()
+    });
+
+    // Update donor profile
+    await updateDoc(donorRef, {
+      donation_count: newCount,
+      badge: newBadge,
+      last_donation_date:
+        new Date().toISOString().split('T')[0],
+      updated_at: serverTimestamp()
+    });
+
+    // Update blood request
+    await updateDoc(requestRef, {
+      status: 'Completed',
+      updated_at: serverTimestamp()
+    });
 
     toast.success(
-      'Donation confirmed! 🎉'
+      `Donation confirmed! 🎉 ${newBadge} badge awarded.`
     );
 
     await load();
 
   } catch (error) {
-
     console.error(
-      'Complete request error:',
+      'Complete donation error:',
       error
     );
 
-    toast.error('Failed to complete request');
-
+    toast.error(
+      error.message || 'Failed to complete donation'
+    );
   }
 };
 

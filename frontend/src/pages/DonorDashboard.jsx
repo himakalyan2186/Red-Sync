@@ -1,8 +1,20 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import toast from 'react-hot-toast';
-import api from '../utils/api';
-import ChatWindow from '../components/ChatWindow';
+
+import {
+  collection,
+  query,
+  where,
+  getDocs,
+  getDoc,
+  addDoc,
+  updateDoc,
+  doc,
+  serverTimestamp
+} from 'firebase/firestore';
+
+import { db } from '../firebase';
 
 const NEXT = { null:{name:'Helper',need:1}, Helper:{name:'Lifesaver',need:5}, Lifesaver:{name:'Hero',need:10}, Hero:{name:'Life Anchor',need:25}, 'Life Anchor':null };
 const ICONS = { Helper:'🤝', Lifesaver:'⭐', Hero:'🦸', 'Life Anchor':'⚓' };
@@ -17,67 +29,323 @@ export default function DonorDashboard() {
   const [notifs, setNotifs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState({ blood_group:'', city:'' });
-  const [chat, setChat] = useState(null); // { sessionId, request, seeker }
-  const [acceptedReq, setAcceptedReq] = useState(null); // request the donor accepted, to show seeker contact
 
-  useEffect(() => { loadProfile(); loadNotifs(); }, []);
-  useEffect(() => { if (tab==='requests') loadRequests(); }, [tab, filter]);
-  useEffect(() => { if (tab==='history') loadDonations(); }, [tab]);
-  useEffect(() => { if (tab==='camps') loadCamps(); }, [tab]);
+useEffect(() => {
+  if (user?.uid) {
+    loadProfile();
+    loadNotifs();
+  }
+}, [user?.uid]);
 
-  const loadProfile = async () => {
-    try { const r = await api.get('/users/profile'); setProfile(r.data); } catch {}
-    setLoading(false);
-  };
-  const loadNotifs = async () => {
-    try { const r = await api.get('/users/notifications'); setNotifs(r.data); } catch {}
-  };
-  const loadRequests = async () => {
-    try {
-      const p = {};
-      if (filter.blood_group) p.blood_group = filter.blood_group;
-      if (filter.city) p.city = filter.city;
-      const r = await api.get('/blood-requests', { params: p });
-      setRequests(r.data.filter(x => x.status==='Pending'));
-    } catch {}
-  };
-  const loadDonations = async () => {
-    try { const r = await api.get('/donations/history'); setDonations(r.data); } catch {}
-  };
-  const loadCamps = async () => {
-    try { const r = await api.get('/blood-camps'); setCamps(r.data); } catch {}
-  };
+useEffect(() => {
+  if (tab === 'requests' && profile) {
+    loadRequests();
+  }
+}, [tab, filter, profile]);
 
-  const accept = async (req) => {
-    try {
-      const { data } = await api.put(`/blood-requests/${req.id}/accept`);
-      toast.success('Request accepted! Seeker has been notified. ✅');
-      // Show seeker contact and open chat
-      setAcceptedReq({ ...req, sessionId: data.sessionId });
-      setChat({
-        sessionId: data.sessionId,
-        request: req,
-        seeker: { id: req.seeker_id, name: req.seeker_name, role:'seeker' },
+useEffect(() => {
+  if (tab === 'history') {
+    loadDonations();
+  }
+}, [tab]);
+
+useEffect(() => {
+  if (tab === 'camps') {
+    loadCamps();
+  }
+}, [tab]);
+const loadProfile = async () => {
+  if (!user?.uid) return;
+
+  try {
+    const profileRef = doc(db, 'users', user.uid);
+    const profileSnap = await getDoc(profileRef);
+
+    if (profileSnap.exists()) {
+      setProfile({
+        id: profileSnap.id,
+        ...profileSnap.data()
       });
-      loadRequests();
-      setProfile(p => p ? {...p, donation_count: p.donation_count} : p);
-    } catch (err) { toast.error(err.response?.data?.message || 'Cannot accept'); }
-  };
+    } else {
+      toast.error('Donor profile not found');
+    }
+  } catch (error) {
+    console.error('Firestore profile error:', error);
+    toast.error('Failed to load donor profile');
+  } finally {
+    setLoading(false);
+  }
+};
 
-  const registerCamp = async (id) => {
-    try { await api.post(`/blood-camps/${id}/register`); toast.success('Registered for camp! 📅'); loadCamps(); }
-    catch (err) { toast.error(err.response?.data?.message || 'Failed'); }
-  };
+const loadNotifs = async () => {
+  if (!user?.uid) return;
 
-  const markRead = async (id) => {
-    await api.put(`/users/notifications/${id}/read`);
-    setNotifs(n => n.map(x => x.id===id ? {...x,is_read:1} : x));
-  };
+  try {
+    const notifQuery = query(
+      collection(db, 'notifications'),
+      where('user_uid', '==', user.uid)
+    );
 
-  const markAllRead = async () => {
-    await api.put('/users/notifications/read-all');
-    setNotifs(n => n.map(x => ({...x,is_read:1})));
-  };
+    const snapshot = await getDocs(notifQuery);
+
+    const notificationList = snapshot.docs.map(docSnap => ({
+      id: docSnap.id,
+      ...docSnap.data()
+    }));
+
+    notificationList.sort((a, b) => {
+      const dateA = a.created_at?.toDate
+        ? a.created_at.toDate()
+        : new Date(a.created_at || 0);
+
+      const dateB = b.created_at?.toDate
+        ? b.created_at.toDate()
+        : new Date(b.created_at || 0);
+
+      return dateB - dateA;
+    });
+
+    setNotifs(notificationList);
+  } catch (error) {
+    console.error('Firestore notification error:', error);
+    setNotifs([]);
+  }
+};
+
+const loadRequests = async () => {
+  if (!profile?.blood_group) return;
+
+  try {
+    const requestsQuery = query(
+      collection(db, 'blood_requests'),
+      where('status', '==', 'Pending'),
+      where(
+        'blood_group',
+        '==',
+        filter.blood_group || profile.blood_group
+      )
+    );
+
+    const snapshot = await getDocs(requestsQuery);
+
+    let requestList = snapshot.docs.map(docSnap => ({
+      id: docSnap.id,
+      ...docSnap.data()
+    }));
+
+    if (filter.city.trim()) {
+      const city = filter.city.trim().toLowerCase();
+
+      requestList = requestList.filter(
+        request =>
+          request.city?.trim().toLowerCase() === city
+      );
+    }
+
+    setRequests(requestList);
+  } catch (error) {
+    console.error('Firestore request error:', error);
+    toast.error('Failed to load blood requests');
+  }
+};
+
+const loadDonations = async () => {
+  if (!user?.uid) return;
+
+  try {
+    const donationsQuery = query(
+      collection(db, 'donations'),
+      where('donor_uid', '==', user.uid)
+    );
+
+    const snapshot = await getDocs(donationsQuery);
+
+    const donationList = snapshot.docs.map(docSnap => ({
+      id: docSnap.id,
+      ...docSnap.data()
+    }));
+
+    setDonations(donationList);
+  } catch (error) {
+    console.error('Firestore donation history error:', error);
+    setDonations([]);
+  }
+};
+
+const loadCamps = async () => {
+  try {
+    const campsQuery = query(
+      collection(db, 'blood_camps')
+    );
+
+    const snapshot = await getDocs(campsQuery);
+
+    let campList = snapshot.docs.map(docSnap => ({
+      id: docSnap.id,
+      ...docSnap.data()
+    }));
+
+    const today = new Date();
+
+    campList = campList.filter(camp => {
+      if (!camp.date) return true;
+      return new Date(camp.date) >= today;
+    });
+
+    campList.sort(
+      (a, b) => new Date(a.date) - new Date(b.date)
+    );
+
+    setCamps(campList);
+  } catch (error) {
+    console.error('Firestore camp error:', error);
+    toast.error('Failed to load blood camps');
+  }
+};
+
+const accept = async (req) => {
+  if (!user?.uid) {
+    toast.error('Please login first');
+    return;
+  }
+
+  if (days > 0) {
+    toast.error(`You can donate after ${days} more days`);
+    return;
+  }
+
+  try {
+    await updateDoc(
+      doc(db, 'blood_requests', req.id),
+      {
+        status: 'Accepted',
+        donor_uid: user.uid,
+        donor_name: profile?.name || user.name || '',
+        donor_email: profile?.email || user.email || '',
+        donor_phone: profile?.phone || '',
+        donor_city: profile?.city || '',
+        donor_blood_group: profile?.blood_group || '',
+        donor_badge: profile?.badge || null,
+        accepted_at: serverTimestamp(),
+        updated_at: serverTimestamp()
+      }
+    );
+
+    toast.success('Request accepted! Seeker has been notified. ✅');
+
+    setRequests(prev =>
+      prev.filter(item => item.id !== req.id)
+    );
+
+  } catch (error) {
+    console.error('Accept request error:', error);
+    toast.error('Cannot accept this request');
+  }
+};
+
+const registerCamp = async (id) => {
+  if (!user?.uid) {
+    toast.error('Please login first');
+    return;
+  }
+
+  try {
+    const registrationsQuery = query(
+      collection(db, 'camp_registrations'),
+      where('camp_id', '==', id),
+      where('donor_uid', '==', user.uid)
+    );
+
+    const existing = await getDocs(registrationsQuery);
+
+    if (!existing.empty) {
+      toast.error('You are already registered for this camp');
+      return;
+    }
+
+    await addDoc(collection(db, 'camp_registrations'), {
+      camp_id: id,
+      donor_uid: user.uid,
+      donor_name: profile?.name || user.name || '',
+      donor_email: profile?.email || user.email || '',
+      donor_phone: profile?.phone || '',
+      blood_group: profile?.blood_group || '',
+      city: profile?.city || '',
+      registered_at: serverTimestamp()
+    });
+
+    const campRef = doc(db, 'blood_camps', id);
+    const campSnap = await getDoc(campRef);
+
+    if (campSnap.exists()) {
+      const camp = campSnap.data();
+
+      await updateDoc(campRef, {
+        registered_count: (camp.registered_count || 0) + 1,
+        updated_at: serverTimestamp()
+      });
+    }
+
+    toast.success('Registered for camp! 📅');
+
+    loadCamps();
+
+  } catch (error) {
+    console.error('Camp registration error:', error);
+    toast.error('Failed to register for camp');
+  }
+};
+
+const markRead = async (id) => {
+  try {
+    await updateDoc(
+      doc(db, 'notifications', id),
+      {
+        is_read: true,
+        read_at: serverTimestamp()
+      }
+    );
+
+    setNotifs(n =>
+      n.map(x =>
+        x.id === id
+          ? { ...x, is_read: true }
+          : x
+      )
+    );
+  } catch (error) {
+    console.error('Mark notification error:', error);
+  }
+};
+
+const markAllRead = async () => {
+  try {
+    const unread = notifs.filter(n => !n.is_read);
+
+    await Promise.all(
+      unread.map(n =>
+        updateDoc(
+          doc(db, 'notifications', n.id),
+          {
+            is_read: true,
+            read_at: serverTimestamp()
+          }
+        )
+      )
+    );
+
+    setNotifs(n =>
+      n.map(x => ({
+        ...x,
+        is_read: true
+      }))
+    );
+
+    toast.success('All notifications marked as read');
+  } catch (error) {
+    console.error('Mark all notifications error:', error);
+  }
+};
 
   const cooldownDays = () => {
     if (!profile?.last_donation_date) return 0;
@@ -173,7 +441,13 @@ export default function DonorDashboard() {
                     {r.description && <span style={{ color:'var(--muted)' }}>{r.description}</span>}
                   </div>
                   <div className="req-footer">
-                    <span className="req-time">{new Date(r.created_at).toLocaleDateString()}</span>
+                   <span className="req-time">
+  {r.created_at?.toDate
+    ? r.created_at.toDate().toLocaleDateString()
+    : r.created_at
+      ? new Date(r.created_at).toLocaleDateString()
+      : 'Recently'}
+</span>
                     <button
                       className="btn btn-primary btn-sm"
                       onClick={()=>accept(r)}
@@ -202,7 +476,13 @@ export default function DonorDashboard() {
                 <tbody>
                   {donations.map(d=>(
                     <tr key={d.id}>
-                      <td>{new Date(d.donation_date).toLocaleDateString()}</td>
+                      <td>
+  {d.donation_date?.toDate
+    ? d.donation_date.toDate().toLocaleDateString()
+    : d.donation_date
+      ? new Date(d.donation_date).toLocaleDateString()
+      : '—'}
+</td>
                       <td><strong>{d.patient_name||'—'}</strong></td>
                       <td><span className="bchip" style={{ width:30,height:30,fontSize:'0.7rem' }}>{d.blood_group||profile?.blood_group}</span></td>
                       <td>{d.hospital_name||'—'}</td>
@@ -225,8 +505,9 @@ export default function DonorDashboard() {
             <div key={c.id} className="card">
               <div style={{ display:'flex', gap:14, marginBottom:14 }}>
                 <div style={{ background:'var(--surface)', borderRadius:10, padding:'10px 14px', textAlign:'center', flexShrink:0 }}>
-                  <div style={{ fontFamily:'var(--font-d)', fontSize:'1.5rem', fontWeight:700, color:'var(--red)', lineHeight:1 }}>{new Date(c.date).getDate()}</div>
-                  <div style={{ fontSize:'0.72rem', color:'var(--muted)', textTransform:'uppercase' }}>{new Date(c.date).toLocaleDateString('en',{month:'short'})}</div>
+                  <div style={{ fontFamily:'var(--font-d)', fontSize:'1.5rem', fontWeight:700, color:'var(--red)', lineHeight:1 }}>
+  {new Date(c.date).getDate()}
+</div>                  <div style={{ fontSize:'0.72rem', color:'var(--muted)', textTransform:'uppercase' }}>{new Date(c.date).toLocaleDateString('en',{month:'short'})}</div>
                 </div>
                 <div>
                   <div style={{ fontWeight:700, fontSize:'1rem', marginBottom:2 }}>{c.camp_name}</div>
@@ -273,17 +554,6 @@ export default function DonorDashboard() {
             </div>
           )}
         </div>
-      )}
-
-      {/* Chat window (opens after accepting) */}
-      {chat && (
-        <ChatWindow
-          sessionId={chat.sessionId}
-          currentUser={{ id: user.id, name: user.name, role: user.role }}
-          otherParty={chat.seeker}
-          requestInfo={chat.request}
-          onClose={() => setChat(null)}
-        />
       )}
     </div>
   );
